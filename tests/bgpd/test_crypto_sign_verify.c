@@ -154,13 +154,26 @@ int main(void)
 {
 	printf("=== BGP crypto-routes Phase 1e: sign/verify unit tests ===\n\n");
 
-	/* ── 1. Generate ECDSA P-256 key pair in memory ─────────────────── */
+	/* ── 1. Generate two independent ECDSA P-256 key pairs ──────────── */
 	EVP_PKEY *keypair = generate_ec_keypair();
 	if (!keypair) {
-		fprintf(stderr, "FATAL: ECDSA P-256 key generation failed\n");
+		fprintf(stderr, "FATAL: ECDSA P-256 key generation failed (keypair 1)\n");
 		return 1;
 	}
-	printf("  Key gen : ECDSA P-256 key pair generated in memory.\n");
+
+	/*
+	 * T-SV4 requires a second, completely independent key pair.
+	 * Generated here so both keys exist throughout all tests and the
+	 * caller can be certain they are different objects with different
+	 * private scalars and public points.
+	 */
+	EVP_PKEY *wrong_keypair = generate_ec_keypair();
+	if (!wrong_keypair) {
+		fprintf(stderr, "FATAL: ECDSA P-256 key generation failed (keypair 2)\n");
+		EVP_PKEY_free(keypair);
+		return 1;
+	}
+	printf("  Key gen : Two independent ECDSA P-256 key pairs generated in memory.\n");
 
 	/*
 	 * Test parameters — same as the wire-format example in the header:
@@ -238,13 +251,37 @@ int main(void)
 	}
 	printf("\n");
 
+	/* ─────────────────────────────────────────────────────────────────
+	 * T-SV4: verify the original signature with the WRONG public key.
+	 *
+	 * This simulates a BGP peer sending a signature produced by a key
+	 * that is NOT in our provisioned cache — e.g. a key belonging to a
+	 * different AS, or a forged signature from an attacker-controlled
+	 * key pair.  In bgp_crypto_routes.c this maps to the case where
+	 * bgp_crypto_key_lookup() returns an entry whose pkey is unrelated
+	 * to the signing key: EVP_DigestVerify must return 0 and
+	 * bgp_crypto_verify() must set sig_state = BGP_CRYPTO_SIG_INVALID.
+	 *
+	 * Expected: EVP_DigestVerify returns 0 (INVALID) because wrong_keypair
+	 * was not used to produce sig[].
+	 * ───────────────────────────────────────────────────────────────── */
+	printf("T-SV4: verify original sig with a different (wrong) public key\n");
+	{
+		int rc = do_verify(wrong_keypair, signed_data, signed_data_len,
+				   sig, sig_len);
+		check("T-SV4: verify returns !=1 (wrong public key rejected)", rc != 1);
+		clear_openssl_err();
+	}
+	printf("\n");
+
 	/* ── cleanup + summary ───────────────────────────────────────────── */
+	EVP_PKEY_free(wrong_keypair);
 	EVP_PKEY_free(keypair);
 
 	if (g_failed == 0)
-		printf("=== All 3 tests PASSED ===\n");
+		printf("=== All 4 tests PASSED ===\n");
 	else
-		fprintf(stderr, "=== %d/3 test(s) FAILED ===\n", g_failed);
+		fprintf(stderr, "=== %d/4 test(s) FAILED ===\n", g_failed);
 
 	return g_failed ? 1 : 0;
 }
