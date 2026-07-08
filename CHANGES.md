@@ -648,6 +648,33 @@ No change to `lib/libfrr.la`, `libyang`, or any other daemon's link flags.
 
 ---
 
+## Phase 1e — T-SV4: wrong-key test added — 2025-07-14
+
+### `frr/tests/bgpd/test_crypto_sign_verify.c` — T-SV4 added
+
+**Test:** Generate a second independent ECDSA P-256 key pair (`wrong_keypair`),
+then attempt to verify the signature produced by `keypair` using `wrong_keypair`'s
+public key.
+
+**Expected result:** `EVP_DigestVerify` returns `0` (invalid) — the signature was
+not produced by `wrong_keypair`'s private key so verification must fail.
+
+**Security relevance:** In production `bgp_crypto_routes.c`, this corresponds to
+the scenario where `bgp_crypto_key_lookup()` finds a key-id in the cache but the
+stored `EVP_PKEY` belongs to a different operator (e.g. a key-id collision from a
+misconfigured peer, or an attacker who discovered the 4-byte key-id and provisioned
+their own key). The ECDSA verification step — not the key-id lookup — is the
+cryptographic boundary that rejects this. T-SV4 proves that boundary holds.
+
+**Implementation:** `wrong_keypair` is generated at startup alongside `keypair`
+so both are live throughout all four tests. It is freed separately before `keypair`
+in reverse allocation order. The `do_verify()` call passes `wrong_keypair` as the
+public key but uses the unmodified `signed_data` and `sig` from T-SV1, isolating
+exactly the key-mismatch dimension.
+
+---
+
+
 ## Phase 1e — Sign/Verify Unit Test — 2025-07-14
 
 ### New file: `frr/tests/bgpd/test_crypto_sign_verify.c`
