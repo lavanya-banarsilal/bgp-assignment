@@ -1,15 +1,17 @@
 {
   "name": "FRR bgpd — crypto-routes",
 
-  // Ubuntu 22.04 matches FRR's official CI base image.
-  // All build dependencies are installed by onCreateCommand below.
-  "image": "ubuntu:22.04",
+  // Use the official GitHub Codespaces Ubuntu image.
+  // "image": "ubuntu:22.04" is silently ignored by Codespaces — it only
+  // honours mcr.microsoft.com/devcontainers/* images. Using the bare
+  // ubuntu:22.04 Docker Hub image caused Codespaces to fall back to its
+  // own default Alpine universal image instead.
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
 
   // Runs once when the Codespace VM is first provisioned.
-  // Installs every FRR build dep and builds libyang 3.13.6 from source.
+  // Installs every FRR build dependency and builds libyang 3.13.6 from source.
   "onCreateCommand": "bash /workspaces/bgp-assignment/.devcontainer/setup.sh",
 
-  // Drop straight into the repo root.
   "workspaceFolder": "/workspaces/bgp-assignment",
 
   "remoteUser": "root",
@@ -17,14 +19,11 @@
   "customizations": {
     "vscode": {
       "extensions": [
-        // C/C++ IntelliSense — resolves FRR headers in the editor
         "ms-vscode.cpptools",
-        // CMake tools — used for libyang source build in setup.sh
         "ms-vscode.cmake-tools"
       ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",
-        // Point IntelliSense at the FRR include dirs
         "C_Cpp.default.includePath": [
           "${workspaceFolder}",
           "${workspaceFolder}/lib",
