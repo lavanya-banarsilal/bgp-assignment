@@ -647,3 +647,43 @@ needs it.
 No change to `lib/libfrr.la`, `libyang`, or any other daemon's link flags.
 
 ---
+
+## Phase 1e — Sign/Verify Unit Test — 2025-07-14
+
+### New file: `frr/tests/bgpd/test_crypto_sign_verify.c`
+
+**Purpose:** Standalone ECDSA P-256 sign/verify test covering the three
+security-critical scenarios: correct verification, tampered signature rejection,
+and tampered prefix rejection.
+
+**Design decisions:**
+
+1. **No FRR dependency** — links only against `-lcrypto`. Does not pull in
+   `libfrr`, `libbgp`, or any FRR headers. This makes it runnable immediately
+   after `./configure` with no `make bgpd/bgpd` step required, and isolates
+   the test from FRR build system changes.
+
+2. **Exact `build_signed_data` replication** — the test implements the same
+   signed-data layout as `bgp_crypto_routes.c:build_signed_data()` verbatim:
+   `prefix_bytes || origin_asn(4B BE) || seq_no(4B BE)`. Any drift between
+   the test and the production function would itself be a bug signal.
+
+3. **In-memory key generation** — no PEM files, no temp directories. The
+   ECDSA P-256 key pair is generated fresh each run via `EVP_PKEY_CTX_new_id`
+   and freed on exit. Each run exercises a different key, ruling out any
+   hardcoded-signature cheating.
+
+4. **Three cases, all must pass:**
+   - `T-SV1`: `EVP_DigestVerify` must return 1 for unmodified data+sig
+   - `T-SV2`: `EVP_DigestVerify` must return ≠1 when `sig[0] ^= 0xFF`
+   - `T-SV3`: `EVP_DigestVerify` must return ≠1 when prefix byte changes
+     `0x0A→0x0B` (10.0.0.0/8 → 11.0.0.0/8) but original sig is reused
+
+**Build & run (Codespace, from `/workspaces/bgp-assignment`):**
+```bash
+gcc -o /tmp/test_crypto_sign_verify \
+    tests/bgpd/test_crypto_sign_verify.c \
+    -lcrypto && /tmp/test_crypto_sign_verify
+```
+
+---
