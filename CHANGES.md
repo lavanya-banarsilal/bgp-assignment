@@ -236,6 +236,43 @@ Note: `bgp_node_safi()` already had the correct `case BGP_CRYPTO_ROUTES_NODE:` r
 
 ---
 
+## Phase 7 — Wire `bgp_crypto_routes_init/finish` into `bgpd.c`
+
+**Date:** 2025-07-10
+**File modified:** `frr/bgpd/bgpd.c`
+
+### Changes
+
+**7.1 — `#include "bgpd/bgp_crypto_routes.h"` added (after `bgp_ls_ted.h`)**
+Reason: `bgpd.c` did not include the crypto-routes header, so the compiler had no
+declaration for `bgp_crypto_routes_init()` / `bgp_crypto_routes_finish()`. FRR builds
+with `-Wimplicit-function-declaration -Werror`, meaning an undeclared function call
+is a hard build error. The include is placed with the other `bgpd/` subsystem includes
+to follow the existing ordering convention.
+
+**7.2 — `bgp_crypto_routes_init()` called at end of `bgp_init()`**
+Reason: `bgp_init()` is the canonical "register and initialise all BGP subsystems"
+function. Every other BGP subsystem (`bgp_attr_init`, `bgp_route_init`,
+`bgp_flowspec_vty_init`, etc.) is started here. Without this call, `g_key_cache`
+remained `NULL` for the entire lifetime of the process. All VTY commands that access
+the key cache (`bgp crypto-routes pubkey ...`, `show bgp crypto-routes pubkeys`)
+hit the `if (!g_key_cache) return -1` early-exit guard and returned "Failed to load
+public key" regardless of whether the PEM file was valid. Placing the call last
+ensures all prerequisite FRR subsystems (memory types, hash infrastructure) are
+already initialised.
+
+**7.3 — `bgp_crypto_routes_finish()` called at end of `bgp_terminate()`
+(after `bgp_mac_finish()`)**
+Reason: `bgp_terminate()` is the mirror teardown (comment on line 9830 says
+"reverse bgp_master_init"). `bgp_crypto_routes_finish()` calls
+`bgp_crypto_key_cache_finish()` which iterates the hash table, calls
+`EVP_PKEY_free()` on every loaded public key, and then frees the hash table itself
+via `hash_clean_and_free()`. Without this call, every loaded public key and the
+hash table backing store would be leaked on graceful shutdown — visible as a valgrind
+LEAK_DEFINITELY_LOST report and relevant when bgpd is restarted under a supervisor.
+
+---
+
 ## Security Considerations
 
 - Private key never enters bgpd. Only the public key PEM file is loaded.

@@ -82,6 +82,7 @@
 #include "bgpd/bgp_srv6.h"
 #include "bgpd/bgp_ls.h"
 #include "bgpd/bgp_ls_ted.h"
+#include "bgpd/bgp_crypto_routes.h"
 
 DEFINE_MTYPE_STATIC(BGPD, PEER_TX_SHUTDOWN_MSG, "Peer shutdown message (TX)");
 DEFINE_QOBJ_TYPE(bgp_master);
@@ -9808,6 +9809,9 @@ void bgp_init(unsigned short instance)
 	bgp_mplsvpn_nexthop_init();
 
 	cmd_variable_handler_register(bgp_viewvrf_var_handlers);
+
+	/* Crypto-routes address family init */
+	bgp_crypto_routes_init();
 }
 
 void bgp_terminate(void)
@@ -9852,6 +9856,7 @@ void bgp_terminate(void)
 	event_cancel(&bm->t_bgp_zebra_l2_vni);
 
 	bgp_mac_finish();
+	bgp_crypto_routes_finish();
 #ifdef ENABLE_BGP_VNC
 	rfapi_terminate();
 #endif
