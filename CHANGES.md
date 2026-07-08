@@ -403,6 +403,62 @@ documented in `frr/doc/developer/building-frr-for-ubuntu2x04.rst`.
 
 ---
 
+## Phase 10 — Fix `network` command origination + M6 test assertion
+
+**Date:** 2025-07-10
+
+### 10.1 — `frr/bgpd/bgp_route.c`: install `network` commands for `BGP_CRYPTO_ROUTES_NODE`
+
+**Root cause (topotest TEST 2 failure):**
+The eBGP session between r1 and r2 established (TEST 1 passed), but r2 never received
+`192.168.100.0/24` because r1 never originated it. `bgp_static_set()` — the function
+that installs a prefix into the BGP static network table for advertisement — is only
+reachable via `bgp_network_cmd` (IPv4) and `ipv6_bgp_network_cmd` (IPv6). Neither
+command was registered for `BGP_CRYPTO_ROUTES_NODE`, so the config line:
+```
+address-family ipv4 crypto-routes
+  network 192.168.100.0/24
+```
+was silently accepted by vtysh (which does not validate command completeness) but
+rejected at bgpd parse time — bgpd has no `network` command in that node context,
+so the line was dropped and the prefix was never installed into the static table.
+
+**Why the fix is two lines, not a new DEFUN:**
+Both `bgp_network_cmd` and `ipv6_bgp_network_cmd` are `DEFPY` definitions in
+`bgp_route.c` that call `bgp_static_set(vty, ..., AFI_IP, bgp_node_safi(vty), ...)`.
+`bgp_node_safi(vty)` already has a correct `case BGP_CRYPTO_ROUTES_NODE: return
+SAFI_CRYPTO_ROUTES;` (added in Phase 3). So installing these existing commands in
+`BGP_CRYPTO_ROUTES_NODE` is all that is needed — exactly the same pattern used for
+`BGP_IPV4L_NODE` and `BGP_IPV6L_NODE`.
+
+**Fix:** Added two `install_element` calls in `bgp_route_init()` after the
+`BGP_IPV4L_NODE` block (line 19186):
+```c
+install_element(BGP_CRYPTO_ROUTES_NODE, &bgp_network_cmd);
+install_element(BGP_CRYPTO_ROUTES_NODE, &ipv6_bgp_network_cmd);
+```
+
+### 10.2 — `test_bgp_crypto_routes_mock.py`: fix M6 assertion for `show bgp summary`
+
+**Root cause (mock test M6 failure):**
+`show bgp summary` on a single-instance bgpd with no peers configured outputs:
+```
+% No BGP neighbors found in VRF default
+```
+This is a valid FRR informational line — it uses `%` as its prefix character
+(FRR's VTY convention for non-error status lines) but is not a CLI parse error.
+The assertion `assert "%" not in out.split("\n")[0]` treated any `%`-prefixed
+output as a failure, making the test always fail on a freshly-started bgpd.
+
+**Fix:** Changed the assertion to check for the actual CLI error strings:
+```python
+assert "Unknown command" not in out and "Command incomplete" not in out
+```
+This correctly passes for `% No BGP neighbors found` (informational) and fails
+only for genuine CLI parse errors.
+
+---
+
 ## Security Considerations
 
 - Private key never enters bgpd. Only the public key PEM file is loaded.

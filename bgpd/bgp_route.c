@@ -19186,6 +19186,19 @@ void bgp_route_init(void)
 	install_element(BGP_IPV4L_NODE, &bgp_network_cmd);
 	install_element(BGP_IPV4L_NODE, &aggregate_addressv4_cmd);
 
+	/*
+	 * crypto-routes (SAFI 200) — IPv4 and IPv6 network origination.
+	 *
+	 * bgp_network_cmd / ipv6_bgp_network_cmd both call bgp_static_set()
+	 * with bgp_node_safi(vty) which returns SAFI_CRYPTO_ROUTES when
+	 * executed inside BGP_CRYPTO_ROUTES_NODE.  No new command
+	 * implementation is needed — reusing the same DEFPY that already
+	 * serves BGP_IPV4_NODE / BGP_IPV6_NODE is the correct pattern
+	 * (identical to how BGP_IPV4L_NODE and BGP_IPV6L_NODE are handled).
+	 */
+	install_element(BGP_CRYPTO_ROUTES_NODE, &bgp_network_cmd);
+	install_element(BGP_CRYPTO_ROUTES_NODE, &ipv6_bgp_network_cmd);
+
 	install_element(VIEW_NODE, &show_ip_bgp_instance_all_cmd);
 	install_element(VIEW_NODE, &show_ip_bgp_afi_safi_statistics_cmd);
 	install_element(VIEW_NODE, &show_ip_bgp_l2vpn_evpn_statistics_cmd);

@@ -260,6 +260,10 @@ class TestCryptoRoutesMock:
         assertion failure when the operator runs this common operational command.
         """
         out = vtysh("show bgp summary")
-        assert "%" not in out.split("\n")[0], (
-            "show bgp summary returned an error: {}".format(out[:200])
+        # "% No BGP neighbors found in VRF default" is a valid FRR
+        # informational line when no peers are configured — not a CLI error.
+        # The real error strings are "% Unknown command" and
+        # "% Command incomplete".
+        assert "Unknown command" not in out and "Command incomplete" not in out, (
+            "show bgp summary returned a CLI error: {}".format(out[:200])
         )
