@@ -84,9 +84,16 @@ rm -rf /tmp/libyang
 pkg-config --modversion libyang
 echo ">>> [2/3] libyang $(pkg-config --modversion libyang) installed."
 
-# ── 3. Python wheel (needed by FRR's make machinery) ─────────────────────────
-echo ">>> [3/3] Installing Python build helpers..."
-python3 -m pip install --quiet --no-cache-dir wheel
+# ── 3. Python packages ────────────────────────────────────────────────────────
+echo ">>> [3/3] Installing Python build + test helpers..."
+python3 -m pip install --quiet --no-cache-dir \
+    wheel \
+    pytest \
+    "pytest-xdist>=3.6.1" \
+    "scapy>=2.4.5" \
+    pyyaml \
+    xmltodict \
+    frrtest
 echo ">>> [3/3] Done."
 
 # ── Done ─────────────────────────────────────────────────────────────────────
@@ -101,4 +108,12 @@ echo "               --disable-rpki --disable-ospfapi \\"
 echo "               --enable-user=root --enable-group=root"
 echo "   make bgpd/bgp_crypto_routes.o   # compile our new file first"
 echo "   make -j\$(nproc) bgpd/bgpd        # full link"
+echo ""
+echo " To run unit tests:"
+echo "   make tests/bgpd/test_crypto_routes"
+echo "   pytest tests/bgpd/test_crypto_routes.py -v"
+echo ""
+echo " To run topotests (requires kernel network namespaces):"
+echo "   cd tests/topotests"
+echo "   sudo pytest bgp_crypto_routes/ -v"
 echo "============================================================"

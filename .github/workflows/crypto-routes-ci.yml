@@ -1,0 +1,228 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# GitHub Actions CI workflow for the BGP crypto-routes feature branch.
+#
+# Runs on every push and pull_request to crypto-routes-feature.
+# Two jobs:
+#   build   — bootstrap, configure, compile bgpd, run unit tests
+#   topotest — full topotest (requires privileged runner + kernel netns)
+#
+# The build job is the primary gate. The topotest job is best-effort
+# (continue-on-error: true) because it requires kernel capabilities not
+# always available in standard GitHub runners.
+
+name: crypto-routes-ci
+
+on:
+  push:
+    branches:
+      - crypto-routes-feature
+  pull_request:
+    branches:
+      - crypto-routes-feature
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: .   # frr/ is the repo root
+
+jobs:
+  # ── Job 1: Build + Unit Tests ───────────────────────────────────────────────
+  build:
+    name: Build bgpd and run unit tests (Ubuntu 22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── System dependencies ────────────────────────────────────────────────
+      - name: Install apt build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool make build-essential pkg-config \
+            git bison flex texinfo install-info perl \
+            python3 python3-dev python3-pip python3-sphinx \
+            libreadline-dev libjson-c-dev libc-ares-dev libcap-dev \
+            libelf-dev libssl-dev libpam0g-dev libunwind-dev \
+            libsqlite3-dev libsnmp-dev \
+            libprotobuf-c-dev protobuf-c-compiler \
+            cmake libpcre2-dev
+
+      # ── libyang 3.13.6 from source ─────────────────────────────────────────
+      - name: Cache libyang build
+        id: cache-libyang
+        uses: actions/cache@v4
+        with:
+          path: /usr/lib/libyang*
+          key: libyang-3.13.6-ubuntu22
+
+      - name: Build and install libyang 3.13.6
+        if: steps.cache-libyang.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v3.13.6 \
+              https://github.com/CESNET/libyang.git /tmp/libyang
+          cmake -S /tmp/libyang -B /tmp/libyang/build \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DCMAKE_BUILD_TYPE=Release
+          make -C /tmp/libyang/build -j"$(nproc)"
+          sudo make -C /tmp/libyang/build install
+          sudo ldconfig
+          rm -rf /tmp/libyang
+          pkg-config --modversion libyang
+
+      - name: Restore ldconfig after cache restore
+        if: steps.cache-libyang.outputs.cache-hit == 'true'
+        run: sudo ldconfig
+
+      # ── Python test helpers ────────────────────────────────────────────────
+      - name: Install Python test helpers
+        run: |
+          python3 -m pip install --quiet --no-cache-dir \
+              wheel pytest "pytest-xdist>=3.6.1" frrtest pyyaml
+
+      # ── Generate configure script ──────────────────────────────────────────
+      - name: bootstrap.sh
+        run: ./bootstrap.sh
+
+      # ── Configure ─────────────────────────────────────────────────────────
+      - name: configure (bgpd only, no doc/grpc/rpki)
+        run: |
+          ./configure \
+            --prefix=/usr \
+            --sysconfdir=/etc/frr \
+            --localstatedir=/var/run/frr \
+            --sbindir=/usr/lib/frr \
+            --enable-bgpd \
+            --disable-doc \
+            --disable-grpc \
+            --disable-rpki \
+            --disable-ospfapi \
+            --disable-vrrpd \
+            --disable-bgp-vnc \
+            --disable-scripting \
+            --enable-user=root \
+            --enable-group=root
+
+      # ── Compile: new file first ────────────────────────────────────────────
+      - name: make bgp_crypto_routes.o
+        run: make bgpd/bgp_crypto_routes.o
+
+      # ── Compile: all changed files ─────────────────────────────────────────
+      - name: make changed bgpd objects
+        run: |
+          make bgpd/bgp_packet.o \
+               bgpd/bgp_attr.o \
+               bgpd/bgp_vty.o \
+               bgpd/bgpd.o
+
+      # ── Full bgpd binary ───────────────────────────────────────────────────
+      - name: make bgpd/bgpd (full link)
+        run: make -j"$(nproc)" bgpd/bgpd
+
+      - name: Verify bgpd binary
+        run: |
+          ls -lh bgpd/bgpd
+          nm bgpd/bgpd | grep crypto_routes | head -10
+
+      # ── Unit tests ────────────────────────────────────────────────────────
+      - name: Build unit test binary
+        run: make tests/bgpd/test_crypto_routes
+
+      - name: Run unit tests
+        run: |
+          cd tests/bgpd
+          pytest test_crypto_routes.py -v --tb=short
+
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: tests/bgpd/test_crypto_routes.log
+          if-no-files-found: ignore
+
+  # ── Job 2: Topotest ─────────────────────────────────────────────────────────
+  topotest:
+    name: Topotest bgp_crypto_routes (privileged)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    needs: build
+    # Topotest requires kernel network namespaces.
+    # continue-on-error allows the build job result to remain the primary gate.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install all deps (reuse build job steps)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool make build-essential pkg-config \
+            git bison flex texinfo install-info perl iproute2 \
+            python3 python3-dev python3-pip \
+            libreadline-dev libjson-c-dev libc-ares-dev libcap-dev \
+            libelf-dev libssl-dev libpam0g-dev libunwind-dev \
+            libsqlite3-dev libsnmp-dev \
+            libprotobuf-c-dev protobuf-c-compiler \
+            cmake libpcre2-dev
+
+      - name: Build libyang 3.13.6
+        run: |
+          git clone --depth 1 --branch v3.13.6 \
+              https://github.com/CESNET/libyang.git /tmp/libyang
+          cmake -S /tmp/libyang -B /tmp/libyang/build \
+                -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release
+          make -C /tmp/libyang/build -j"$(nproc)"
+          sudo make -C /tmp/libyang/build install
+          sudo ldconfig
+          rm -rf /tmp/libyang
+
+      - name: Install Python topotest deps
+        run: |
+          python3 -m pip install --quiet --no-cache-dir \
+              wheel pytest "pytest-xdist>=3.6.1" \
+              "scapy>=2.4.5" pyyaml xmltodict frrtest
+
+      - name: bootstrap + configure + make bgpd + install
+        run: |
+          ./bootstrap.sh
+          ./configure \
+            --prefix=/usr \
+            --sysconfdir=/etc/frr \
+            --localstatedir=/var/run/frr \
+            --sbindir=/usr/lib/frr \
+            --enable-bgpd \
+            --disable-doc --disable-grpc --disable-rpki \
+            --disable-ospfapi --disable-vrrpd --disable-bgp-vnc \
+            --disable-scripting \
+            --enable-user=root --enable-group=root
+          make -j"$(nproc)" bgpd/bgpd
+          sudo make install
+
+      - name: Run topotest bgp_crypto_routes
+        run: |
+          cd tests/topotests
+          sudo pytest bgp_crypto_routes/ -v --tb=short \
+            --log-cli-level=INFO \
+            -p no:timeout \
+            --junitxml=../../topotest-results.xml
+
+      - name: Upload topotest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: topotest-results
+          path: topotest-results.xml
+          if-no-files-found: ignore
