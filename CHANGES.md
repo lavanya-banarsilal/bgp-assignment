@@ -714,3 +714,31 @@ gcc -o /tmp/test_crypto_sign_verify \
 ```
 
 ---
+
+## Bug Fix — `bgp_vty.c`: address-family crypto-routes entry commands not registered — 2025-07-14
+
+**File:** `frr/bgpd/bgp_vty.c`
+
+**Bug:** `DEFUN_NOSH(address_family_crypto_routes, ...)` and
+`DEFUN_NOSH(address_family_crypto_routes_ipv6, ...)` were defined at lines
+11875–11903 but never passed to `install_element()`. As a result, vtysh had no
+knowledge of `address-family ipv4 crypto-routes` or `address-family ipv6
+crypto-routes` as valid commands under `BGP_NODE`, and `exit-address-family`
+was not available inside `BGP_CRYPTO_ROUTES_NODE`.
+
+**Root cause:** The `address_family_link_state_cmd` install (line 25069) was the
+last address-family entry in the block. The crypto-routes additions were not
+appended to that block during the initial implementation.
+
+**Fix:** Three `install_element` calls added at lines 25069–25086:
+```c
+install_element(BGP_NODE, &address_family_crypto_routes_cmd);
+install_element(BGP_NODE, &address_family_crypto_routes_ipv6_cmd);
+install_element(BGP_CRYPTO_ROUTES_NODE, &exit_address_family_cmd);
+```
+
+No logic change — purely registration of already-defined commands.
+Without this fix, `bgpd` starts cleanly but `address-family ipv4 crypto-routes`
+is rejected by vtysh with "Unknown command".
+
+---

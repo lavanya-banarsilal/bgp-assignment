@@ -25067,6 +25067,9 @@ void bgp_vty_init(void)
 
 	install_element(BGP_NODE, &address_family_evpn_cmd);
 	install_element(BGP_NODE, &address_family_link_state_cmd);
+	/* crypto-routes address-family entry points (IPv4 and IPv6) */
+	install_element(BGP_NODE, &address_family_crypto_routes_cmd);
+	install_element(BGP_NODE, &address_family_crypto_routes_ipv6_cmd);
 
 	/* "exit-address-family" command. */
 	install_element(BGP_IPV4_NODE, &exit_address_family_cmd);
@@ -25083,6 +25086,7 @@ void bgp_vty_init(void)
 	install_element(BGP_IPV6U_NODE, &exit_address_family_cmd);
 	install_element(BGP_EVPN_NODE, &exit_address_family_cmd);
 	install_element(BGP_LS_NODE, &exit_address_family_cmd);
+	install_element(BGP_CRYPTO_ROUTES_NODE, &exit_address_family_cmd);
 
 	/* BGP retain all route-target */
 	install_element(BGP_VPNV4_NODE, &bgp_retain_route_target_cmd);
