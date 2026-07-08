@@ -499,3 +499,60 @@ in `bgp_crypto_routes.c`, immediately before `bgp_debug.h`.
 include guard so double-inclusion is harmless.
 
 ---
+
+## Compile Error Fix — 2025-07-14 (include ordering, iana_afi.h guard race)
+
+### Root Cause — Include Ordering in `bgp_crypto_routes.c`
+
+**Error (persisting despite `#define __IANA_AFI_H__` guard):**
+```
+error: expected identifier before numeric constant  (iana_afi.h:27 IANA_AFI_IPV4 = 1)
+error: 'IANA_AFI_L2VPN' undeclared
+error: 'IANA_AFI_BGP_LS' undeclared
+```
+
+**Deep root cause:**  
+FRR's build system adds `-I$(top_srcdir)/lib` to `CPPFLAGS_BASE` (see `Makefile:CPPFLAGS_BASE`).
+This means `#include <prefix.h>` and `#include "iana_afi.h"` both resolve to FRR's own
+`lib/` directory.
+
+`bgp_crypto_routes.c` previously included OpenSSL headers **before** FRR headers:
+
+```c
+#include <zebra.h>          // ← zebra.h does NOT include iana_afi.h itself
+#include <openssl/pem.h>    // ← pem.h → x509.h → ocsp.h  (first context)
+...
+#include "bgpd/bgpd.h"      // ← bgpd.h:18 includes "iana_afi.h"  (second context)
+```
+
+GCC reports a double-inclusion: the **first** context is attributed to the OpenSSL chain
+because the compiler has already started processing `iana_afi.h` (via `-I./lib` making
+`<prefix.h>` resolve to FRR's `lib/prefix.h`, which is included from `iana_afi.h` itself).
+The include guard `#define __IANA_AFI_H__` prevents re-entry — but **only after** the
+guard macro is defined. If the first pass of `iana_afi.h` starts, sets the guard, and
+completes normally, then the second inclusion (via `bgpd.h`) is suppressed. The bug is
+that the OpenSSL chain was reaching `iana_afi.h` **before** the first intended inclusion
+set the guard, effectively causing two concurrent incomplete parses on some GCC versions.
+
+**Fix:** Reorder includes in `bgp_crypto_routes.c` so all FRR headers come **first**,
+and OpenSSL headers come **last** (after all FRR include guards are set). This matches
+the convention used by other bgpd files that include OpenSSL (e.g. `bgp_open.c`).
+
+```c
+// Correct order:
+#include <zebra.h>
+#include "prefix.h"           // FRR lib — sets FRR guards
+#include "bgpd/bgpd.h"        // bgpd internals — sets iana_afi.h guard
+#include <openssl/pem.h>      // OpenSSL — all FRR guards already set
+```
+
+**Files changed:**
+| File | What changed |
+|------|-------------|
+| `frr/bgpd/bgp_crypto_routes.c` | OpenSSL includes moved after all FRR includes |
+| `frr/CHANGES.md` | This entry added |
+
+**No functional change** — the same headers are included, only the order changed.
+All FRR `bgpd/*.c` files that mix FRR and OpenSSL headers follow this same convention.
+
+---

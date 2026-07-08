@@ -17,13 +17,11 @@
 
 #include <zebra.h>
 
-/* OpenSSL headers */
-#include <openssl/evp.h>
-#include <openssl/pem.h>
-#include <openssl/sha.h>
-#include <openssl/err.h>
-
-/* FRR lib */
+/* FRR lib — included first so all FRR include guards are set before any
+ * third-party header (e.g. OpenSSL) is processed.  This matters because
+ * lib/iana_afi.h is pulled in transitively by bgpd.h; if OpenSSL headers
+ * came first the FRR -I./lib search path could expose FRR headers to
+ * OpenSSL's own #include chains before the guards are set. */
 #include "prefix.h"
 #include "log.h"
 #include "memory.h"
@@ -42,6 +40,13 @@
 #include "bgpd/bgp_errors.h"
 #include "bgpd/bgp_memory.h"
 #include "bgpd/bgp_crypto_routes.h"
+
+/* OpenSSL headers — included after all FRR headers so that FRR include
+ * guards are already set when the compiler processes these. */
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/sha.h>
+#include <openssl/err.h>
 
 /*
  * Memory types are declared extern in bgp_memory.h and defined (with external
