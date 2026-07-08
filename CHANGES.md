@@ -742,3 +742,38 @@ Without this fix, `bgpd` starts cleanly but `address-family ipv4 crypto-routes`
 is rejected by vtysh with "Unknown command".
 
 ---
+
+## Bug Fix — `vtysh/vtysh.c`: BGP_CRYPTO_ROUTES_NODE not registered in vtysh — 2025-07-14
+
+**File:** `frr/vtysh/vtysh.c`
+
+**Symptom:** `vtysh: install_BGP_CRYPTO_ROUTES_NODE(): assertion (node) failed` — core dump on startup.
+
+**Root cause:** vtysh builds its own command tree independently of bgpd. Every node that
+bgpd registers must be **also** registered in `vtysh.c` with three components:
+
+1. A `static struct cmd_node` definition (so vtysh knows the node exists and its prompt)
+2. `DEFUNSH` entry commands (so vtysh can route `address-family` input to the right node)
+3. `install_node()` + `install_element()` calls in `vtysh_init_cmd()` (so the node is
+   wired into vtysh's command dispatch at startup)
+
+`BGP_CRYPTO_ROUTES_NODE` had all three components in `bgpd/bgp_vty.c` but **none** in
+`vtysh/vtysh.c`. When `vtysh_init_cmd()` called the auto-generated
+`install_BGP_CRYPTO_ROUTES_NODE()` (from `vtysh_cmd.c`, produced by clippy scanning
+bgpd sources), it passed the node ID but vtysh had no `cmd_node` struct for that ID →
+`assert(node) failed`.
+
+**Fix — four additions to `vtysh/vtysh.c`, all modelled on the `bgp_ls_node` pattern:**
+
+| Addition | Location in file | Purpose |
+|----------|-----------------|---------|
+| `static struct cmd_node bgp_crypto_routes_node` | After `bgp_ls_node` definition (~line 1541) | Registers node struct so vtysh knows the node |
+| `DEFUNSH address_family_crypto_routes` (IPv4) | After `address_family_link_state` (~line 2045) | Routes `address-family ipv4 crypto-routes` to the node |
+| `DEFUNSH address_family_crypto_routes_ipv6` (IPv6) | Same block | Routes `address-family ipv6 crypto-routes` to the node |
+| `install_node(&bgp_crypto_routes_node)` | After `install_node(&bgp_ls_node)` (~line 5353) | Registers node at startup |
+| `install_element` block (BGP_NODE entry + CRYPTO_ROUTES_NODE exit/quit/end) | After `bgp_ls_node` element installs (~line 5553) | Wires entry commands and navigation |
+
+No logic change — purely registration of the node vtysh already received commands for
+from bgpd's clippy-generated `vtysh_cmd.c`.
+
+---

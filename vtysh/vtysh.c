@@ -1540,6 +1540,13 @@ static struct cmd_node bgp_ls_node = {
 	.prompt = "%s(config-router-af)# ",
 };
 
+static struct cmd_node bgp_crypto_routes_node = {
+	.name = "bgp crypto-routes",
+	.node = BGP_CRYPTO_ROUTES_NODE,
+	.parent_node = BGP_NODE,
+	.prompt = "%s(config-router-af)# ",
+};
+
 static struct cmd_node ospf_node = {
 	.name = "ospf",
 	.node = OSPF_NODE,
@@ -2041,6 +2048,28 @@ DEFUNSH(VTYSH_BGPD, address_family_link_state, address_family_link_state_cmd,
 	"Link-State Subsequent Address Family\n")
 {
 	vty->node = BGP_LS_NODE;
+	return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_BGPD, address_family_crypto_routes,
+	address_family_crypto_routes_cmd,
+	"address-family ipv4 crypto-routes",
+	"Enter Address Family command mode\n"
+	"IPv4 Address Family\n"
+	"Crypto-Routes: cryptographically-authenticated BGP prefix SAFI\n")
+{
+	vty->node = BGP_CRYPTO_ROUTES_NODE;
+	return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_BGPD, address_family_crypto_routes_ipv6,
+	address_family_crypto_routes_ipv6_cmd,
+	"address-family ipv6 crypto-routes",
+	"Enter Address Family command mode\n"
+	"IPv6 Address Family\n"
+	"Crypto-Routes: cryptographically-authenticated BGP prefix SAFI\n")
+{
+	vty->node = BGP_CRYPTO_ROUTES_NODE;
 	return CMD_SUCCESS;
 }
 
@@ -5351,6 +5380,7 @@ void vtysh_init_vty(void)
 	install_node(&bmp_node);
 	install_node(&bgp_srv6_node);
 	install_node(&bgp_ls_node);
+	install_node(&bgp_crypto_routes_node);
 	install_node(&rip_node);
 	install_node(&ripng_node);
 	install_node(&ospf_node);
@@ -5551,6 +5581,13 @@ void vtysh_init_vty(void)
 	install_element(BGP_LS_NODE, &vtysh_exit_bgpd_cmd);
 	install_element(BGP_LS_NODE, &vtysh_end_all_cmd);
 	install_element(BGP_LS_NODE, &exit_address_family_cmd);
+
+	install_element(BGP_NODE, &address_family_crypto_routes_cmd);
+	install_element(BGP_NODE, &address_family_crypto_routes_ipv6_cmd);
+	install_element(BGP_CRYPTO_ROUTES_NODE, &vtysh_quit_bgpd_cmd);
+	install_element(BGP_CRYPTO_ROUTES_NODE, &vtysh_exit_bgpd_cmd);
+	install_element(BGP_CRYPTO_ROUTES_NODE, &vtysh_end_all_cmd);
+	install_element(BGP_CRYPTO_ROUTES_NODE, &exit_address_family_cmd);
 #endif /* HAVE_BGPD */
 
 	/* ripd */
