@@ -1,6 +1,19 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Python test runner for test_crypto_routes.
 # Consumed by pytest via frrtest.TestMultiOut — same pattern as test_mp_attr.py.
+#
+# frrtest is NOT a PyPI package. It lives in tests/helpers/python/frrtest.py
+# inside the FRR source tree. We locate it relative to this file so pytest
+# can be invoked from any working directory.
+import os
+import sys
+
+# Walk up from tests/bgpd/ → tests/ → helpers/python/
+_TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HELPERS = os.path.join(_TESTS_DIR, "helpers", "python")
+if _HELPERS not in sys.path:
+    sys.path.insert(0, _HELPERS)
+
 import frrtest
 
 

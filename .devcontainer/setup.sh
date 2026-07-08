@@ -86,14 +86,17 @@ echo ">>> [2/3] libyang $(pkg-config --modversion libyang) installed."
 
 # ── 3. Python packages ────────────────────────────────────────────────────────
 echo ">>> [3/3] Installing Python build + test helpers..."
+# NOTE: frrtest is NOT a PyPI package — it lives in the repo at
+# tests/helpers/python/frrtest.py and frrsix.py. It is loaded by
+# pytest automatically via sys.path (tests/runtests.py adds it).
+# Do NOT try to pip install it — that is what caused this error.
 python3 -m pip install --quiet --no-cache-dir \
     wheel \
     pytest \
     "pytest-xdist>=3.6.1" \
     "scapy>=2.4.5" \
     pyyaml \
-    xmltodict \
-    frrtest
+    xmltodict
 echo ">>> [3/3] Done."
 
 # ── Done ─────────────────────────────────────────────────────────────────────

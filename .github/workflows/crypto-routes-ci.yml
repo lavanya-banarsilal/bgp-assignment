@@ -85,8 +85,9 @@ jobs:
       # ── Python test helpers ────────────────────────────────────────────────
       - name: Install Python test helpers
         run: |
+          # frrtest is a local module in tests/helpers/python/ — not on PyPI
           python3 -m pip install --quiet --no-cache-dir \
-              wheel pytest "pytest-xdist>=3.6.1" frrtest pyyaml
+              wheel pytest "pytest-xdist>=3.6.1" pyyaml
 
       # ── Generate configure script ──────────────────────────────────────────
       - name: bootstrap.sh
@@ -191,9 +192,10 @@ jobs:
 
       - name: Install Python topotest deps
         run: |
+          # frrtest is a local module in tests/helpers/python/ — not on PyPI
           python3 -m pip install --quiet --no-cache-dir \
               wheel pytest "pytest-xdist>=3.6.1" \
-              "scapy>=2.4.5" pyyaml xmltodict frrtest
+              "scapy>=2.4.5" pyyaml xmltodict
 
       - name: bootstrap + configure + make bgpd + install
         run: |
