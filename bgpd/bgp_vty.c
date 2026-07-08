@@ -11935,7 +11935,10 @@ DEFUN(bgp_crypto_pubkey,
 	int rc;
 
 	asn = strtoul(argv[idx_asn]->arg, NULL, 10);
-	if (asn == 0 || asn > 4294967295UL) {
+	/* as_t is uint32_t (lib/asn.h); comparing > UINT32_MAX is always false
+	 * and triggers -Wtype-limits.  strtoul() already caps at ULONG_MAX;
+	 * the only invalid value we need to reject is 0 (reserved by RFC 7607). */
+	if (asn == 0) {
 		vty_out(vty, "%% Invalid AS number '%s'\n",
 			argv[idx_asn]->arg);
 		return CMD_WARNING_CONFIG_FAILED;

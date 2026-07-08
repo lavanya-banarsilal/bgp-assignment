@@ -556,3 +556,94 @@ the convention used by other bgpd files that include OpenSSL (e.g. `bgp_open.c`)
 All FRR `bgpd/*.c` files that mix FRR and OpenSSL headers follow this same convention.
 
 ---
+
+## Compiler Warning & Linker Fixes — 2025-07-14 (make bgpd/bgpd pass 2)
+
+### Fix 1 — `bgp_open.c:174` `-Wswitch`: `SAFI_CRYPTO_ROUTES` not handled (JSON path)
+
+**File:** `frr/bgpd/bgp_open.c`  
+**Warning:** `enumeration value 'SAFI_CRYPTO_ROUTES' not handled in switch`
+
+**Reasoning:** `bgp_capability_vty_out()` contains two exhaustive `switch(safi)` blocks
+that deliberately avoid `default:` so `-Wswitch` catches any future missing SAFI.
+Adding `SAFI_CRYPTO_ROUTES` to `lib/zebra.h` requires a matching case in every such
+switch. The JSON path logs capability errors; the correct string is `"crypto-routes"`,
+matching `safi2str()` in `lib/prefix.c` and the kebab-case convention used by every
+other SAFI string in this block (`"labeled-unicast"`, `"BGP-LS"`, etc.).
+
+**Change:** Added `case SAFI_CRYPTO_ROUTES: json_object_string_add(..., "crypto-routes")`
+before `SAFI_UNSPEC` / `SAFI_MAX`. No logic change to any existing path.
+
+---
+
+### Fix 2 — `bgp_open.c:257` `-Wswitch`: `SAFI_CRYPTO_ROUTES` not handled (VTY plain-text path)
+
+**File:** `frr/bgpd/bgp_open.c`  
+**Warning:** same function, plain-text VTY output branch.
+
+**Reasoning:** Same as Fix 1. The VTY string is `"SAFI Crypto-Routes"`, matching the
+`"SAFI Unicast"`, `"SAFI BGP-LS"`, `"SAFI Unreachability"` capitalisation convention.
+
+**Change:** Added `case SAFI_CRYPTO_ROUTES: vty_out(vty, "SAFI Crypto-Routes")`
+before `SAFI_UNSPEC` / `SAFI_MAX`. No logic change to any existing path.
+
+---
+
+### Fix 3 — `bgp_route.c:15018` `-Wswitch`: `SAFI_CRYPTO_ROUTES` not handled in `bgp_rd_from_dest`
+
+**File:** `frr/bgpd/bgp_route.c`  
+**Warning:** `enumeration value 'SAFI_CRYPTO_ROUTES' not handled in switch`
+
+**Reasoning:** `bgp_rd_from_dest()` returns a Route Distinguisher prefix for VPN-type
+SAFIs (`SAFI_MPLS_VPN`, `SAFI_ENCAP`, `SAFI_EVPN`) and `NULL` for all others.
+`SAFI_CRYPTO_ROUTES` carries flat IP prefixes with an appended Crypto-SIG TLV — it has
+no Route Distinguisher. It therefore belongs in the `NULL`-return group alongside
+`SAFI_UNICAST`, `SAFI_BGP_LS`, `SAFI_UNREACH`, etc.
+
+**Change:** Added `case SAFI_CRYPTO_ROUTES:` to the `return NULL` fall-through group.
+No logic change to any existing path.
+
+---
+
+### Fix 4 — `bgp_vty.c:11938` `-Wtype-limits`: `asn > 4294967295UL` always false
+
+**File:** `frr/bgpd/bgp_vty.c`  
+**Warning:** `comparison is always false due to limited range of data type`
+
+**Reasoning:** `as_t` is `typedef uint32_t as_t` (`lib/asn.h:26`). `uint32_t` has a
+maximum value of exactly `4294967295` (`UINT32_MAX`). Comparing a `uint32_t` against
+`4294967295UL` is therefore always `false` — the compiler is correct.
+`strtoul()` already handles overflow by returning `ULONG_MAX`; the only semantically
+invalid AS number is `0` (reserved by RFC 7607 §2). The upper-bound check is removed;
+the `asn == 0` check is kept.
+
+**Change:** `if (asn == 0 || asn > 4294967295UL)` → `if (asn == 0)`. Added comment
+citing `lib/asn.h` and RFC 7607. No change in valid-input behaviour.
+
+---
+
+### Fix 5 — Linker: `undefined reference to EVP_PKEY_free`, `SHA256`, `PEM_read_PUBKEY`, etc.
+
+**File:** `frr/bgpd/subdir.am`  
+**Error:** `ld: bgpd/libbgp.a(bgp_crypto_routes.o): undefined reference to 'EVP_PKEY_free'` (and 15 others)
+
+**Reasoning:** `bgp_crypto_routes.c` calls OpenSSL EVP, PEM, SHA-256 and ERR functions
+directly. These live in `libcrypto` (part of OpenSSL). The `bgpd_bgpd_LDADD` variable
+in `subdir.am` did not include `-lcrypto`:
+
+```makefile
+# before
+bgpd_bgpd_LDADD = bgpd/libbgp.a ... lib/libfrr.la $(LIBYANG_LIBS) $(LIBCAP) $(LIBM) $(UST_LIBS)
+```
+
+`configure.ac` lines 859–865 add `-lcrypto` to the global `$LIBS` **only** when
+`--with-crypto=openssl` is passed to `./configure`. That flag controls FRR's internal
+password-hashing path (used in `lib/`), and we deliberately did not set it because it
+would pull `-lcrypto` into every daemon. The correct fix is to add `-lcrypto` only to
+the two `bgpd` link lines, keeping the dependency scoped to exactly the binary that
+needs it.
+
+**Change:** Appended `-lcrypto` to `bgpd_bgpd_LDADD` and `bgpd_bgp_btoa_LDADD`.
+No change to `lib/libfrr.la`, `libyang`, or any other daemon's link flags.
+
+---
