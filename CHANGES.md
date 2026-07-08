@@ -349,9 +349,89 @@ cmake --install-prefix /usr -DCMAKE_BUILD_TYPE=Release .. && make && sudo make i
 cd ../../frr
 
 ./bootstrap.sh
-./configure --prefix=/usr --sysconfdir=/etc/frr --localstatedir=/var/run/frr \
-  --disable-doc --disable-grpc --enable-bgpd --disable-rpki
+
+# configure — pass plain system prefix dirs; configure.ac appends /frr itself
+./configure \
+  --prefix=/usr \
+  --sysconfdir=/etc \
+  --localstatedir=/var \
+  --sbindir=/usr/lib/frr \
+  --enable-bgpd \
+  --disable-doc --disable-grpc --disable-rpki \
+  --disable-ospfapi --disable-vrrpd --disable-bgp-vnc \
+  --disable-scripting \
+  --enable-user=root --enable-group=root
+
+# generate route_types.h before any single-file make invocation
+make lib/route_types.h
+
 make -j$(nproc) bgpd/bgpd
 ```
+
+---
+
+## Build Warning Fixes — 2025-07-14
+
+### Warning 1 — `lib/subdir.am:539: user target '.y.c' defined here` (automake bootstrap)
+
+**Status:** No change needed — pre-existing upstream FRR issue.
+
+**Reasoning:**
+`lib/subdir.am` lines 537–540 deliberately override automake's built-in `.y.c` suffix rule
+to suppress the `ylwrap` wrapper (comment on line 536 documents this). Automake 1.16 detects
+the collision and prints a warning, but the custom rule wins and the build is correct.
+This warning exists in upstream FRR and is not caused by any code in this project.
+No fix is applied; touching FRR's yacc/lex pipeline would risk breaking generated parsers
+(`lib/command_lex.c`, `lib/command_parse.c`).
+
+### Warning 2 — `configure: WARNING: please fix your ./configure invocation (remove /frr)`
+
+**Status:** Fixed — `frr/.devcontainer/setup.sh` hint banner updated.
+
+**Reasoning:**
+FRR 9.2+ changed path conventions (`configure.ac` lines 36–92). The old invocation style
+passed `/frr`-suffixed paths directly:
+
+```
+--sysconfdir=/etc/frr        # old style — triggers warning
+--localstatedir=/var/run/frr # old style — triggers warning
+```
+
+`configure.ac` now auto-strips the `/frr` suffix as a compatibility shim and emits a
+deprecation warning. The correct modern invocation passes **plain system prefix dirs**;
+`configure.ac` appends `/frr` internally:
+
+```
+--sysconfdir=/etc            # correct — configure produces /etc/frr
+--localstatedir=/var         # correct — configure produces /var/run/frr
+```
+
+**Files changed:**
+| File | What changed |
+|------|-------------|
+| `frr/.devcontainer/setup.sh` | Hint banner updated: `--sysconfdir=/etc`, `--localstatedir=/var`; added `make lib/route_types.h` step |
+| `frr/CHANGES.md` | Stale `./configure` example in Production Build Notes corrected; this entry added |
+
+### Fatal Error — `lib/route_types.h: No such file or directory`
+
+**Status:** No code change needed — build sequence documentation added.
+
+**Reasoning:**
+`lib/route_types.h` is a **generated file** (not tracked in git). It is produced by:
+
+```
+perl lib/route_types.pl [--enabled <daemon>...] < lib/route_types.txt > lib/route_types.h
+```
+
+This rule is declared in `lib/subdir.am` line 643. The top-level `make bgpd/bgpd` honours
+this dependency automatically via the `$(lib_libfrr_la_OBJECTS): lib/route_types.h`
+prerequisite at `lib/subdir.am:560`. However, a single-target invocation like
+`make bgpd/bgp_crypto_routes.o` does **not** walk the full dependency graph, so when
+`lib/zebra.h:148` does `#include "lib/route_types.h"` the file is absent and compilation
+aborts.
+
+**Fix:** Run `make lib/route_types.h` once after `./configure` and before any
+single-object compilation. The `setup.sh` hint banner now documents this explicitly.
+The full `make -j$(nproc) bgpd/bgpd` path is unaffected.
 
 ---
