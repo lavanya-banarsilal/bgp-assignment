@@ -37,19 +37,18 @@
 #include "bgpd/bgp_attr.h"
 #include "bgpd/bgp_route.h"
 #include "bgpd/bgp_packet.h"
+#include "bgpd/bgp_aspath.h"
 #include "bgpd/bgp_debug.h"
 #include "bgpd/bgp_errors.h"
 #include "bgpd/bgp_memory.h"
 #include "bgpd/bgp_crypto_routes.h"
 
-/* =========================================================================
- * Memory type definitions
- * Declared in bgp_memory.h / bgp_memory.c; defined here via DEFINE_MTYPE.
- * ========================================================================= */
-DEFINE_MTYPE_STATIC(BGPD, BGP_CRYPTO_PUBKEY,
-		    "BGP crypto-routes public key entry");
-DEFINE_MTYPE_STATIC(BGPD, BGP_ROUTE_EXTRA_CRYPTO,
-		    "BGP extra info for crypto-routes");
+/*
+ * Memory types are declared extern in bgp_memory.h and defined (with external
+ * linkage) in bgp_memory.c via DEFINE_MTYPE.  Do NOT redefine them here —
+ * a second DEFINE_MTYPE_STATIC would produce a conflicting static declaration
+ * against the already-declared extern symbol, causing a compile error.
+ */
 
 /* =========================================================================
  * Module-level state

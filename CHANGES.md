@@ -435,3 +435,67 @@ single-object compilation. The `setup.sh` hint banner now documents this explici
 The full `make -j$(nproc) bgpd/bgpd` path is unaffected.
 
 ---
+
+## Compile Error Fixes — 2025-07-14 (make bgpd/bgpd)
+
+### Bug 1 — Missing `#define` in `lib/iana_afi.h` include guard
+
+**Error:** `error: expected identifier before numeric constant` at `IANA_AFI_IPV4 = 1`  
+**File:** `frr/lib/iana_afi.h`
+
+**Root cause:**  
+The file had `#ifndef __IANA_AFI_H__` on line 7 but was missing the matching
+`#define __IANA_AFI_H__` on line 8. Without the `#define`, the guard is never set after
+the first inclusion. When `openssl/pem.h` is included before `bgpd/bgpd.h` (which
+re-includes `iana_afi.h` transitively), the `#ifndef` passes a second time and the compiler
+sees the `typedef enum` definitions again — causing the `expected identifier` error because
+a `typedef` cannot be redeclared.
+
+**Fix:** Added `#define __IANA_AFI_H__` immediately after the `#ifndef` on line 8.  
+This is the standard two-line include-guard pattern. No logic change — purely structural.  
+**No existing code is affected:** all other TUs that include `iana_afi.h` already worked
+because they happened to include it before OpenSSL headers; the guard was simply never
+tested by a re-include until now.
+
+---
+
+### Bug 2 — `DEFINE_MTYPE_STATIC` conflicts with `DECLARE_MTYPE` in `bgp_crypto_routes.c`
+
+**Error:** `static declaration of 'MTYPE_BGP_CRYPTO_PUBKEY' follows non-static declaration`  
+**File:** `frr/bgpd/bgp_crypto_routes.c`
+
+**Root cause:**  
+`bgp_memory.h` declares `DECLARE_MTYPE(BGP_CRYPTO_PUBKEY)` which expands to
+`extern struct memtype MTYPE_BGP_CRYPTO_PUBKEY[1]` (external linkage).
+`bgp_memory.c` defines it with `DEFINE_MTYPE(BGPD, BGP_CRYPTO_PUBKEY, ...)` (external linkage).
+`bgp_crypto_routes.c` then called `DEFINE_MTYPE_STATIC(...)` which expands to
+`static struct memtype MTYPE_BGP_CRYPTO_PUBKEY[1]` — **static vs extern is a conflicting
+storage class**; C99 §6.2.2 makes this undefined behaviour and GCC rejects it as an error.
+The same conflict applied to `BGP_ROUTE_EXTRA_CRYPTO`.
+
+**Fix:** Removed both `DEFINE_MTYPE_STATIC` lines from `bgp_crypto_routes.c`.
+The types are already correctly owned by `bgp_memory.c` (external linkage);
+`bgp_crypto_routes.c` only needs them via the `extern` declaration in `bgp_memory.h`,
+which it already includes.  
+**No existing code is affected:** the symbols still exist with the same definitions —
+only the erroneous duplicate definition in this file is removed.
+
+---
+
+### Bug 3 — `bgp_aspath.h` not included; `aspath_get_last_as` implicitly declared
+
+**Warning (fatal):** `implicit declaration of function 'aspath_get_last_as'`  
+**File:** `frr/bgpd/bgp_crypto_routes.c`
+
+**Root cause:**  
+`aspath_get_last_as()` is declared in `bgpd/bgp_aspath.h` line 122.
+`bgp_crypto_routes.c` called the function but never included that header.
+GCC treats implicit function declarations as errors under `-Wimplicit-function-declaration`
+(enabled by FRR's default CFLAGS).
+
+**Fix:** Added `#include "bgpd/bgp_aspath.h"` to the bgpd-internals include block
+in `bgp_crypto_routes.c`, immediately before `bgp_debug.h`.  
+**No existing code is affected:** purely an additive include; `bgp_aspath.h` has a correct
+include guard so double-inclusion is harmless.
+
+---

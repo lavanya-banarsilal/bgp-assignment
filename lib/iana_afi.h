@@ -5,6 +5,7 @@
  * Donald Sharp
  */
 #ifndef __IANA_AFI_H__
+#define __IANA_AFI_H__
 
 #include <prefix.h>
 
