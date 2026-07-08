@@ -273,6 +273,55 @@ LEAK_DEFINITELY_LOST report and relevant when bgpd is restarted under a supervis
 
 ---
 
+## Phase 8 — Topotest Bug Fixes (`test_bgp_crypto_routes.py`)
+
+**Date:** 2025-07-10
+**File modified:** `frr/tests/topotests/bgp_crypto_routes/test_bgp_crypto_routes.py`
+
+### Issue 1 — Tests 2 & 5: per-prefix JSON VTY output not implemented
+
+**Root cause:** `test_crypto_routes_prefix_received()` (TEST 2) and
+`test_session_clear_and_reconverge()` (TEST 5) both called:
+```
+show bgp ipv4 crypto-routes 192.168.100.0/24 json
+```
+The registered VTY command string is `"show bgp <ipv4|ipv6> crypto-routes [detail] [json]"` —
+it accepts no prefix argument. The FRR CLI parser would return `% Unknown command`,
+causing a `json.JSONDecodeError` in the test, which in turn reported a false failure
+on every run regardless of whether the prefix was actually in the table.
+
+**Fix:** Both tests now call `show bgp ipv4 crypto-routes` (plain text, table dump)
+and use a substring match for `"192.168.100.0"`. This is identical to the pattern
+already used by TEST 3 (`test_show_crypto_routes_vty`), which was correct all along.
+The assertion is still rigorous: the prefix must appear in the RIB output before the
+retry deadline.
+
+**Why not add per-prefix JSON to the VTY handler?**
+That would require: (a) extending the command string with `[PREFIX]`, (b) walking
+only the matching `bgp_dest`, (c) serialising `bgp_path_info` fields to JSON —
+roughly 60 lines of `bgp_vty.c` with a new `bgp_path_info_to_json()` helper. It is
+a valid future improvement but is out of scope for the current phase; the plain-text
+check is fully sufficient to validate NLRI propagation.
+
+### Issue 2 — Test 4: wrong VTY command for pubkey show
+
+**Root cause:** `test_pubkey_load_and_show()` (TEST 4) called:
+```
+show bgp ipv4 crypto-routes pubkeys
+```
+The registered command (in `bgp_vty.c` `bgp_vty_init()`) is:
+```
+show bgp crypto-routes pubkeys
+```
+There is no `ipv4` token in the command string. The pubkey cache is global (not
+per-AFI), so an AFI token in the show command would be misleading. The CLI parser
+returned `% Unknown command`, so the output never contained `"65001"` and the test
+always failed.
+
+**Fix:** Changed the call in the `_check()` closure to `"show bgp crypto-routes pubkeys"`.
+
+---
+
 ## Security Considerations
 
 - Private key never enters bgpd. Only the public key PEM file is loaded.
