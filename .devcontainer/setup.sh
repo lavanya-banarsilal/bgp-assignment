@@ -69,6 +69,26 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 echo ">>> [1/3] apt dependencies installed."
 
+# ── 1b. Create frr system user + groups required by topotests ─────────────────
+# FRR's topotest framework (topotest.py line 1650, 1863, 1871) unconditionally
+# runs:
+#   chown frr:frrvty /etc/frr
+#   chown frr:frr    /etc/frr/*.conf
+# inside every router namespace.  If the 'frr' user or 'frrvty' group do not
+# exist the chown fails with "invalid user: 'frr:frr'" and every topotest setup
+# aborts.  This is the exact pre-build step documented in
+# frr/doc/developer/building-frr-for-ubuntu2x04.rst.
+echo ">>> [1b] Creating frr system user and groups..."
+groupadd --system frrvty 2>/dev/null || true
+groupadd --system frr    2>/dev/null || true
+useradd  --system --gid frr \
+         --home-dir /var/run/frr \
+         --shell /sbin/nologin \
+         --comment "FRR routing suite" \
+         frr 2>/dev/null || true
+usermod -a -G frrvty frr
+echo ">>> [1b] frr user/groups ready."
+
 # ── 2. Build libyang 3.13.6 from source ──────────────────────────────────────
 # Ubuntu 22.04 ships libyang 2.0 — FRR requires >= 2.1.128.
 echo ">>> [2/3] Building libyang v3.13.6 from source..."

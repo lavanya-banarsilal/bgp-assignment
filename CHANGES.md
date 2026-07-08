@@ -322,7 +322,7 @@ always failed.
 
 ---
 
-## Phase 9 — Privileged Container + Mock Tests
+## Phase 9 — Privileged Container + Mock Tests + `frr` User Fix
 
 **Date:** 2025-07-10
 
@@ -371,6 +371,35 @@ same functional properties without any namespace machinery.
 
 All tests are skipped automatically (not failed) if bgpd is not running, with a
 human-readable message showing exactly which commands to run to start it.
+
+### 9.3 — `frr/.devcontainer/setup.sh`: create `frr` system user + groups
+
+**File modified:** `frr/.devcontainer/setup.sh`
+
+**Root cause of `chown frr:frr` failure:**
+After Phase 9.1 gave the container `CAP_SYS_ADMIN`, namespace creation succeeded
+and munet moved on to setting up each router's `/etc/frr/` directory. At that
+point `topotest.py` unconditionally runs:
+```bash
+chown frr:frrvty /etc/frr          # line 1650
+chown frr:frr    /etc/frr/mgmtd.conf  # line 1863
+chown frr:frr    /etc/frr/bgpd.conf   # line 1871
+```
+These expect a `frr` system user and `frrvty` group to exist inside each router
+namespace (which shares the host's user database). We built with
+`--enable-user=root --enable-group=root`, so no `frr` user was ever created.
+The `chown` returned `invalid user: 'frr:frr'`, munet raised `CalledProcessError`,
+and every test setup aborted.
+
+**Fix:** Added a block immediately after `apt-get clean` in `setup.sh` that creates:
+- group `frrvty` (system)
+- group `frr` (system)
+- user `frr` (system, home `/var/run/frr`, shell `/sbin/nologin`)
+- adds `frr` to `frrvty` group
+
+All commands use `|| true` so the script is idempotent (re-running setup on an
+already-provisioned container does not fail). This is the exact pre-build step
+documented in `frr/doc/developer/building-frr-for-ubuntu2x04.rst`.
 
 ---
 
