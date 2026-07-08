@@ -2,14 +2,26 @@
   "name": "FRR bgpd — crypto-routes",
 
   // Use the official GitHub Codespaces Ubuntu image.
-  // "image": "ubuntu:22.04" is silently ignored by Codespaces — it only
-  // honours mcr.microsoft.com/devcontainers/* images. Using the bare
-  // ubuntu:22.04 Docker Hub image caused Codespaces to fall back to its
-  // own default Alpine universal image instead.
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
 
+  // runArgs — passed directly to `docker run` when Codespaces starts the container.
+  //
+  // --privileged  : grants all Linux capabilities including CAP_SYS_ADMIN and
+  //                 CAP_NET_ADMIN.  Required for FRR topotests: munet/mutini calls
+  //                 unshare(CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWUTS) to create
+  //                 per-router network namespaces.  Without this flag the kernel
+  //                 returns EPERM, mutini exits rc=5, and every topotest setup
+  //                 fails with "AssertionError: unshare failed".
+  //
+  // --cap-add SYS_ADMIN : belt-and-suspenders — ensures SYS_ADMIN is in the
+  //                 bounding set even if --privileged behaviour changes in future
+  //                 Docker/Codespaces releases.
+  //
+  // Note: --privileged also removes the default seccomp profile, which is needed
+  // because munet bind-mounts /proc inside each router namespace via mount(2).
+  "runArgs": ["--privileged", "--cap-add", "SYS_ADMIN", "--cap-add", "NET_ADMIN"],
+
   // Runs once when the Codespace VM is first provisioned.
-  // Installs every FRR build dependency and builds libyang 3.13.6 from source.
   "onCreateCommand": "bash /workspaces/bgp-assignment/.devcontainer/setup.sh",
 
   "workspaceFolder": "/workspaces/bgp-assignment",

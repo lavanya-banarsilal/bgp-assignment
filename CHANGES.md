@@ -322,6 +322,58 @@ always failed.
 
 ---
 
+## Phase 9 — Privileged Container + Mock Tests
+
+**Date:** 2025-07-10
+
+### 9.1 — `frr/.devcontainer/devcontainer.json`: add `runArgs` with `--privileged`
+
+**File modified:** `frr/.devcontainer/devcontainer.json`
+
+**Root cause of topotest failure:**
+FRR's topotest framework (munet/mutini) creates one Linux network namespace per
+virtual router via `unshare(CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWUTS)`.  This
+requires `CAP_SYS_ADMIN` in the process capability bounding set.  The default
+GitHub Codespace container does **not** include `CAP_SYS_ADMIN` — the kernel
+returns `EPERM`, `mutini.py` exits with rc=5 (its hardcoded error exit), and every
+topotest setup phase fails with `AssertionError: unshare failed`.
+
+**Fix:** Added `"runArgs": ["--privileged", "--cap-add", "SYS_ADMIN", "--cap-add", "NET_ADMIN"]`
+to `devcontainer.json`.  `--privileged` is the standard Docker flag used by FRR's
+own upstream CI (`frr/docker/ubuntu-ci/Dockerfile`) for exactly this reason.
+`--cap-add SYS_ADMIN` is belt-and-suspenders in case `--privileged` semantics
+narrow in a future Codespaces release.
+
+**Effect:** Takes effect on the next Codespace **rebuild** (Ctrl+Shift+P →
+"Codespaces: Rebuild Container").  The existing running Codespace container
+cannot be patched without a rebuild — its bounding set is immutable after start.
+
+### 9.2 — `test_bgp_crypto_routes_mock.py`: VTY-socket-based tests (NEW)
+
+**File created:** `frr/tests/topotests/bgp_crypto_routes/test_bgp_crypto_routes_mock.py`
+
+**Reasoning:**
+While the Codespace container does not yet have `CAP_SYS_ADMIN` (requires a rebuild),
+the single-instance bgpd started with `-S` already proved to work in smoke tests
+T-A/T-B/T-C.  A second test file that targets the VTY socket directly validates the
+same functional properties without any namespace machinery.
+
+**Six tests:**
+
+| ID | What it tests | Mirrors topotest |
+|----|--------------|-----------------|
+| M1 | bgpd is alive (`show version`) | Pre-condition for TEST 1 |
+| M2 | `show bgp ipv4 crypto-routes` returns table header, not error | TEST 3 |
+| M3 | `bgp crypto-routes pubkey <asn> <pem>` prints key-id confirmation | TEST 4 load |
+| M4 | `show bgp crypto-routes pubkeys` lists origin-AS and key-id | TEST 4 show |
+| M5 | `show bgp ipv6 crypto-routes` does not crash (Phase 6 AFI fix) | IPv6 variant |
+| M6 | `show bgp summary` does not crash with new SAFI registered | Operational safety |
+
+All tests are skipped automatically (not failed) if bgpd is not running, with a
+human-readable message showing exactly which commands to run to start it.
+
+---
+
 ## Security Considerations
 
 - Private key never enters bgpd. Only the public key PEM file is loaded.
