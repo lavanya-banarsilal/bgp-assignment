@@ -1424,3 +1424,139 @@ The `case SAFI_CRYPTO_ROUTES: fallthrough;` at line 4927 in the `AFI_IP` nexthop
 | `frr/CHANGES.md` | This entry |
 
 ---
+
+## Phase 15 — TEST 2 Final Fix: RFC 8212 ebgp-requires-policy silently filtered all routes
+
+**Date:** 2025-07-09
+
+### Diagnosis
+
+After all previous fixes (BGP_PATH_VALID, signing, nexthop AFI, parser tolerating
+SIG_NONE), TEST 2 still failed — r2 received nothing for the full 80-second window.
+The DIAG probe campaign added in this phase revealed the exact checkpoint where the
+pipeline stopped.
+
+#### Evidence trail
+
+Added `zlog_warn` probes (DIAG-5a through DIAG-8) at every step between
+`group_announce_route()` and `bpacket_queue_add()`.
+
+Key evidence from `r1/bgpd.log` after the probe commit:
+
+```
+DIAG-4a: group_announce_route afi=1 safi=10 afid=16 pi=0x... updgrp_hash=0x...
+[— DIAG-5a through DIAG-8: ZERO lines —]
+```
+
+`DIAG-4a` fires (the update-group walk starts), but `DIAG-5a` — which is the
+first line inside `group_announce_route_walkcb()` — never fires. This means the
+walker callback was never invoked, which means `update_group_af_walk()` found
+**zero update-groups** for `afi=1 safi=10` at config-load time.
+
+Secondary finding from `bgpd.err`:
+```
+Unable to set log file: bgpd.log
+```
+The working directory is not writable when bgpd starts inside its network namespace.
+All post-config-load log output (session establishment, UPDATE pipeline) was
+silently discarded. This explains why all previous DIAG lines had appeared empty.
+
+#### Root cause — RFC 8212 `bgp ebgp-requires-policy` enabled by default
+
+`bgp_vty.c` line 105–108:
+```c
+FRR_CFG_DEFAULT_BOOL(BGP_EBGP_REQUIRES_POLICY,
+    { .val_bool = false, .match_profile = "datacenter", },
+    { .val_bool = false, .match_version = "< 7.4", },
+    { .val_bool = true },   ← default for FRR >= 7.4 (this Codespace runs 10.8.0-dev)
+);
+```
+
+With this flag active, `subgroup_announce_check()` at line 2636 calls:
+```c
+if (CHECK_FLAG(bgp->flags, BGP_FLAG_EBGP_REQUIRES_POLICY))
+    if (!bgp_outbound_policy_exists(peer, filter))
+        return false;
+```
+
+`bgp_outbound_policy_exists()` returns `true` only if the eBGP peer has at least one
+of: route-map out, prefix-list out, filter-list out, or distribute-list out configured
+for the given `[afi][safi]`. Neither r1 nor r2 had any policy configured under
+`address-family ipv4 crypto-routes`, so `bgp_outbound_policy_exists()` returned
+`false` for every route on r1 — silently, throttled to one `zlog_warn` every 15
+minutes.
+
+Result: the route was in r1's RIB with `BGP_PATH_VALID` and `BGP_PATH_SELECTED`
+set, the update-group existed, the coalesce timer fired — but `subgroup_announce_check`
+returned `false` for every route, so `bgp_adj_out_set_subgroup()` was never called,
+the adv FIFO was always empty, `subgroup_update_packet()` found nothing to encode, and
+zero UPDATE messages were ever sent for SAFI 200.
+
+#### Why DIAG-5a appeared to show "no subgroups"
+
+At config-load time (`09:12:50`), `bgp_process()` calls `group_announce_route()` for
+the `network 192.168.100.0/24` statement. But r2's session is not yet established
+(`09:12:51` is when the session came up). Update-groups are created when a peer
+reaches `Established` state. At config-load time there are no update-groups yet,
+so `update_group_af_walk()` has nothing to walk and `group_announce_route_walkcb()`
+is never invoked — DIAG-5a correctly does not fire.
+
+The route IS advertised later via `subgroup_announce_route()` (the coalesce timer
+sweep after session establishment) — but that path also calls `subgroup_announce_check`
+which returns `false` due to RFC 8212. All evidence pointed to the post-session path,
+which was silently dropping every route with no visible log output (due to the `bgpd.log`
+file-open failure).
+
+### Fix
+
+**Files:** `frr/tests/topotests/bgp_crypto_routes/r1/bgpd.conf`  
+          `frr/tests/topotests/bgp_crypto_routes/r2/bgpd.conf`
+
+Added `no bgp ebgp-requires-policy` to both router configs immediately after
+`bgp router-id`:
+
+```
+router bgp 65001
+ bgp router-id 10.0.0.1
+ no bgp ebgp-requires-policy
+ ...
+```
+
+This disables RFC 8212 enforcement for the test routers, consistent with every
+other FRR topotest that runs eBGP without explicit per-AF policies (e.g.
+`bgp_basic`, `bgp_evpn_rt5`, `bgp_flowspec`).
+
+**Why not add a route-map instead?**
+A route-map `permit 10` with no match conditions is functionally equivalent and
+"more correct" from a production standpoint, but it adds 3 lines of config per
+router and makes the test harder to read. The `no bgp ebgp-requires-policy`
+form is the FRR-idiomatic way to disable the check and is universally used in
+the topotest suite for exactly this scenario.
+
+### Test result
+
+```
+======================== 5 passed, 2 warnings in 20.60s ========================
+```
+
+All 5 tests pass:
+- TEST 1: eBGP session Established with SAFI 200 negotiated ✅
+- TEST 2: 192.168.100.0/24 present in r2's SAFI 200 table ✅
+- TEST 3: `show bgp ipv4 crypto-routes` on r2 shows prefix ✅
+- TEST 4: Public key loaded and visible in `show bgp crypto-routes pubkeys` ✅
+- TEST 5: Prefix re-advertised within 5 s after `clear bgp *` ✅
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `frr/tests/topotests/bgp_crypto_routes/r1/bgpd.conf` | Added `no bgp ebgp-requires-policy` |
+| `frr/tests/topotests/bgp_crypto_routes/r2/bgpd.conf` | Added `no bgp ebgp-requires-policy` |
+| `frr/bgpd/bgp_updgrp_adv.c` | DIAG-5a/5b/5c/5d probes (retained for diagnostic reference) |
+| `frr/bgpd/bgp_route.c` | DIAG-6a/6b/6c probes (retained) |
+| `frr/bgpd/bgp_updgrp_packet.c` | DIAG-7a/7b/7c/7d probes (retained) |
+| `frr/bgpd/bgp_attr.c` | DIAG-8 probe (retained) |
+| `frr/scripts/fix_and_test.sh` | Build/install/test runner script |
+| `frr/CHANGES.md` | This entry |
+
+---
