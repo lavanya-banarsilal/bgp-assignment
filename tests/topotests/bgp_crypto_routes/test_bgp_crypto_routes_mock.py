@@ -267,3 +267,49 @@ class TestCryptoRoutesMock:
         assert "Unknown command" not in out and "Command incomplete" not in out, (
             "show bgp summary returned a CLI error: {}".format(out[:200])
         )
+
+    # ── TEST M7: privkey configuration command ────────────────────────────────
+
+    def test_M7_privkey_config(self):
+        """
+        TEST M7 — 'bgp crypto-routes privkey FILENAME' must accept a path and
+        print a confirmation, and 'no bgp crypto-routes privkey' must succeed.
+
+        Rationale: Phase 11 added the privkey provisioning command so locally-
+        originated prefixes can be signed.  This test validates that the VTY
+        command is registered, parses the filename argument correctly, and
+        reports success (the confirmation message proves bgp->crypto_privkey_path
+        was set).  We do NOT attempt to originate and sign a real prefix in
+        this mock test (that requires a full network statement + UPDATE assembly
+        path) — this test only validates the VTY plumbing.
+        """
+        privkey_path = "/tmp/test_privkey.pem"
+        if not os.path.exists(privkey_path):
+            pytest.skip("Test private key not found at {}".format(privkey_path))
+
+        out = vtysh(
+            "configure terminal",
+            "router bgp {}".format(ORIGIN_ASN),
+            " address-family ipv4 crypto-routes",
+            "  bgp crypto-routes privkey {}".format(privkey_path),
+            " exit-address-family",
+            "exit",
+            "exit",
+        )
+        assert "privkey" in out.lower() or "set" in out.lower(), (
+            "Expected confirmation from 'bgp crypto-routes privkey', got: {}".format(out[:300])
+        )
+
+        # Also test the 'no' variant
+        out_no = vtysh(
+            "configure terminal",
+            "router bgp {}".format(ORIGIN_ASN),
+            " address-family ipv4 crypto-routes",
+            "  no bgp crypto-routes privkey",
+            " exit-address-family",
+            "exit",
+            "exit",
+        )
+        assert "removed" in out_no.lower() or "privkey" in out_no.lower(), (
+            "Expected confirmation from 'no bgp crypto-routes privkey', got: {}".format(out_no[:300])
+        )

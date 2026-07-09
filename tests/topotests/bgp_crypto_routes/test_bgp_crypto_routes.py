@@ -154,10 +154,13 @@ def setup_module(mod):
                 " exit-address-family\n"
                 "end\n".format(_pubkey_path)
             )
-        # Trigger a soft reset on r1 so it re-originates the prefix with
-        # the newly configured private key.  Without this, the network
+        # Trigger a full session reset on r1 so it re-originates the prefix
+        # with the newly configured private key.  Without this, the network
         # statement was already processed before the key was configured.
-        tgen.gears["r1"].vtysh_cmd("clear bgp ipv4 crypto-routes * soft out")
+        # Note: "clear bgp ipv4 crypto-routes * soft out" is NOT a valid
+        # command because crypto-routes is not in BGP_SAFI_WITH_LABEL_CMD_STR.
+        # "clear bgp *" resets all peers which is equivalent here.
+        tgen.gears["r1"].vtysh_cmd("clear bgp *")
         time.sleep(5)
     else:
         # No openssl — wait the usual time for the unsigned prefix to propagate
