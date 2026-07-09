@@ -833,6 +833,13 @@ void subgroup_announce_table(struct update_subgroup *subgrp,
 
 		for (ri = bgp_dest_get_bgp_path_info(dest); ri; ri = ri->next) {
 
+			/* DIAG-3b: trace bgp_check_selected for SAFI_CRYPTO_ROUTES */
+			if (safi == SAFI_CRYPTO_ROUTES)
+				zlog_warn("DIAG-3b: subgroup_announce_table ri=%p flags=0x%x selected=%d peer=%s",
+					  (void *)ri, ri->flags,
+					  CHECK_FLAG(ri->flags, BGP_PATH_SELECTED),
+					  peer->host);
+
 			if (!bgp_check_selected(ri, peer, addpath_capable, afi,
 						safi_rib))
 				continue;
@@ -1191,6 +1198,14 @@ void group_announce_route(struct bgp *bgp, afi_t afi, safi_t safi,
 	 */
 	if (!bgp_check_advertise(bgp, dest, safi))
 		return;
+
+	/* DIAG-4a: confirm update-group walk fires for SAFI_CRYPTO_ROUTES */
+	if (safi == SAFI_CRYPTO_ROUTES) {
+		int afid = afindex(afi, safi);
+		zlog_warn("DIAG-4a: group_announce_route afi=%d safi=%d afid=%d pi=%p updgrp_hash=%p",
+			  afi, safi, afid, (void *)pi,
+			  (void *)(afid < BGP_AF_MAX ? bgp->update_groups[afid] : NULL));
+	}
 
 	update_group_af_walk(bgp, afi, safi, group_announce_route_walkcb, &ctx);
 }

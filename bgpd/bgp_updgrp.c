@@ -2053,16 +2053,35 @@ void update_group_adjust_peer(struct peer_af *paf)
 
 	peer = PAF_PEER(paf);
 	if (!peer_established(peer->connection)) {
+		/* DIAG-4b: why peer is not being added to update group */
+		if (paf->safi == SAFI_CRYPTO_ROUTES)
+			zlog_warn("DIAG-4b: update_group_adjust_peer skip (not established) peer=%s afi=%d safi=%d",
+				  peer->host, paf->afi, paf->safi);
 		return;
 	}
 
 	if (!peer_is_config_node(peer)) {
+		/* DIAG-4b: why peer is not being added to update group */
+		if (paf->safi == SAFI_CRYPTO_ROUTES)
+			zlog_warn("DIAG-4b: update_group_adjust_peer skip (not config node) peer=%s afi=%d safi=%d",
+				  peer->host, paf->afi, paf->safi);
 		return;
 	}
 
 	if (!peer->afc_nego[paf->afi][paf->safi]) {
+		/* DIAG-4b: afc_nego=0 means SAFI not negotiated */
+		if (paf->safi == SAFI_CRYPTO_ROUTES)
+			zlog_warn("DIAG-4b: update_group_adjust_peer skip (afc_nego=0) peer=%s afi=%d safi=%d afc=%d",
+				  peer->host, paf->afi, paf->safi,
+				  peer->afc[paf->afi][paf->safi]);
 		return;
 	}
+
+	/* DIAG-4b: peer IS being added to update group for SAFI_CRYPTO_ROUTES */
+	if (paf->safi == SAFI_CRYPTO_ROUTES)
+		zlog_warn("DIAG-4b: update_group_adjust_peer ACCEPTED peer=%s afi=%d safi=%d afc_nego=%d",
+			  peer->host, paf->afi, paf->safi,
+			  peer->afc_nego[paf->afi][paf->safi]);
 
 	updgrp = update_group_find(paf);
 	if (!updgrp)

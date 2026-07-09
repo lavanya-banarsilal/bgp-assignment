@@ -2421,6 +2421,12 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 	afi = SUBGRP_AFI(subgrp);
 	safi = SUBGRP_SAFI(subgrp);
 	peer = SUBGRP_PEER(subgrp);
+
+	/* DIAG-3: confirm subgroup_announce_check() is reached for SAFI_CRYPTO_ROUTES */
+	if (safi == SAFI_CRYPTO_ROUTES)
+		zlog_warn("DIAG-3: subgroup_announce_check() entered peer=%s afi=%d safi=%d pi_flags=0x%x",
+			  peer->host, afi, safi,
+			  pi ? pi->flags : 0xDEAD);
 	onlypeer = NULL;
 	if (CHECK_FLAG(peer->flags, PEER_FLAG_LONESOUL))
 		onlypeer = SUBGRP_PFIRST(subgrp)->peer;
