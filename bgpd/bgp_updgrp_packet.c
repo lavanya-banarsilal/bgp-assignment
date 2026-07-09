@@ -707,6 +707,12 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 	addpath_capable = bgp_addpath_encode_tx(peer, afi, safi);
 	addpath_overhead = addpath_capable ? BGP_ADDPATH_ID_LEN : 0;
 
+	/* DIAG-7a: confirm subgroup_update_packet was entered for SAFI_CRYPTO_ROUTES */
+	if (safi == SAFI_CRYPTO_ROUTES)
+		zlog_warn("DIAG-7a: subgroup_update_packet entered peer=%s afi=%d safi=%d fifo_depth=%u",
+			  peer->host, afi, safi,
+			  bgp_adv_fifo_count(&subgrp->sync->update));
+
 	adv = bgp_adv_fifo_first(&subgrp->sync->update);
 	while (adv) {
 		const struct prefix *dest_p;
@@ -717,6 +723,13 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 		adj = adv->adj;
 		addpath_tx_id = adj->addpath_tx_id;
 		path = adv->pathi;
+
+		/* DIAG-7b: trace each prefix being packetized */
+		if (safi == SAFI_CRYPTO_ROUTES)
+			zlog_warn("DIAG-7b: subgroup_update_packet processing prefix=%pFX afi=%d safi=%d path=%p space_remaining=%d space_needed=%d",
+				  dest_p, afi, safi, (void *)path,
+				  (int)(STREAM_CONCAT_REMAIN(s, snlri, STREAM_SIZE(s)) - BGP_MAX_PACKET_SIZE_OVERFLOW),
+				  (int)(BGP_NLRI_LENGTH + addpath_overhead + bgp_packet_mpattr_prefix_size(afi, safi, dest_p)));
 
 		space_remaining = STREAM_CONCAT_REMAIN(s, snlri, STREAM_SIZE(s))
 				  - BGP_MAX_PACKET_SIZE_OVERFLOW;
@@ -954,10 +967,24 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 				 - stream_get_getp(packet)),
 				peer->max_packet_size, num_pfx);
 		pkt = bpacket_queue_add(SUBGRP_PKTQ(subgrp), packet, &vecarr);
+
+		/* DIAG-7c: UPDATE packet has been pushed to the bpacket queue */
+		if (safi == SAFI_CRYPTO_ROUTES)
+			zlog_warn("DIAG-7c: UPDATE packet queued to bpacket peer=%s afi=%d safi=%d pkt_len=%zu num_pfx=%d",
+				  peer->host, afi, safi,
+				  stream_get_endp(packet) - stream_get_getp(packet),
+				  num_pfx);
+
 		stream_reset(s);
 		stream_reset(snlri);
 		return pkt;
 	}
+
+	/* DIAG-7d: subgroup_update_packet found no advertiseable routes in FIFO */
+	if (safi == SAFI_CRYPTO_ROUTES)
+		zlog_warn("DIAG-7d: subgroup_update_packet returning NULL (stream empty) peer=%s afi=%d safi=%d",
+			  peer->host, afi, safi);
+
 	return NULL;
 }
 

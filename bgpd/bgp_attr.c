@@ -4920,6 +4920,12 @@ size_t bgp_packet_mpattr_start(struct stream *s, struct peer *peer, afi_t afi,
 	else
 		nh_afi = BGP_NEXTHOP_AFI_FROM_NHLEN(attr->mp_nexthop_len);
 
+	/* DIAG-8: log nh_afi decision in bgp_packet_mpattr_start for SAFI_CRYPTO_ROUTES */
+	if (safi == SAFI_CRYPTO_ROUTES)
+		zlog_warn("DIAG-8: bgp_packet_mpattr_start reached peer=%s afi=%d safi=%d nh_afi=%d mp_nexthop_len=%d nexthop=%pI4",
+			  peer->host, afi, safi, nh_afi,
+			  attr->mp_nexthop_len, &attr->nexthop);
+
 	/* Nexthop */
 	bpacket_attr_vec_arr_set_vec(vecarr, BGP_ATTR_VEC_NH, s, attr);
 	switch (nh_afi) {

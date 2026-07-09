@@ -233,6 +233,19 @@ static int group_announce_route_walkcb(struct update_group *updgrp, void *arg)
 		zlog_debug("%s: afi=%s, safi=%s, p=%pBD", __func__,
 			   afi2str(afi), safi2str(safi), ctx->dest);
 
+	/* DIAG-5a: count subgroups found by the walker for SAFI_CRYPTO_ROUTES */
+	if (safi == SAFI_CRYPTO_ROUTES) {
+		int _sg_count = 0;
+		struct update_subgroup *_sg;
+		UPDGRP_FOREACH_SUBGRP(updgrp, _sg)
+			_sg_count++;
+		struct update_subgroup *_first = LIST_FIRST(&updgrp->subgrps);
+		zlog_warn("DIAG-5a: walkcb afi=%d safi=%d pi=%p subgrp_count=%d coalesce_pending=%d peer=%s",
+			  afi, safi, (void *)ctx->pi, _sg_count,
+			  (_first && event_is_scheduled(_first->t_coalesce)) ? 1 : 0,
+			  peer->host);
+	}
+
 	UPDGRP_FOREACH_SUBGRP (updgrp, subgrp) {
 		/* An update-group that uses addpath */
 		if (addpath_capable) {
@@ -240,6 +253,9 @@ static int group_announce_route_walkcb(struct update_group *updgrp, void *arg)
 			 * to expire.
 			 */
 			if (event_is_scheduled(subgrp->t_coalesce)) {
+				if (safi == SAFI_CRYPTO_ROUTES)
+					zlog_warn("DIAG-5b: walkcb ADDPATH coalesce timer pending — skipping announce for subgrp=%" PRIu64 " safi=%d",
+						  subgrp->id, safi);
 				subgrp_withdraw_stale_addpath(ctx, subgrp);
 
 				goto done;
@@ -262,6 +278,10 @@ static int group_announce_route_walkcb(struct update_group *updgrp, void *arg)
 			 * to expire.
 			 */
 			if (event_is_scheduled(subgrp->t_coalesce)) {
+				if (safi == SAFI_CRYPTO_ROUTES)
+					zlog_warn("DIAG-5c: walkcb NON-ADDPATH coalesce timer pending — skipping announce for subgrp=%" PRIu64 " safi=%d pi=%p pi_unuseable=%d",
+						  subgrp->id, safi, (void *)ctx->pi,
+						  ctx->pi ? CHECK_FLAG(ctx->pi->flags, BGP_PATH_UNUSEABLE) : -1);
 				if (!ctx->pi || CHECK_FLAG(ctx->pi->flags, BGP_PATH_UNUSEABLE)) {
 					RB_FOREACH_SAFE (adj, bgp_adj_out_rb, &ctx->dest->adj_out,
 							 adj_next) {
@@ -277,6 +297,9 @@ static int group_announce_route_walkcb(struct update_group *updgrp, void *arg)
 			}
 
 			if (ctx->pi) {
+				if (safi == SAFI_CRYPTO_ROUTES)
+					zlog_warn("DIAG-5d: walkcb calling subgroup_process_announce_selected subgrp=%" PRIu64 " pi=%p pi_flags=0x%x peer=%s",
+						  subgrp->id, (void *)ctx->pi, ctx->pi->flags, peer->host);
 				subgroup_process_announce_selected(
 					subgrp, ctx->pi, ctx->dest, afi, safi,
 					bgp_addpath_id_for_peer(peer, afi, safi,
@@ -692,6 +715,12 @@ bool bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 			bgp_adjust_routeadv(PAF_PEER(paf));
 		}
 	}
+
+	/* DIAG-6d: route successfully enqueued in adv FIFO for this subgroup */
+	if (safi == SAFI_CRYPTO_ROUTES)
+		zlog_warn("DIAG-6d: bgp_adj_out_set_subgroup SUCCESS — route enqueued in adv FIFO peer=%s prefix=%pBD safi=%d fifo_depth=%u",
+			  peer->host, dest, safi,
+			  bgp_adv_fifo_count(&subgrp->sync->update) + 1);
 
 	bgp_adv_fifo_add_tail(&subgrp->sync->update, adv);
 

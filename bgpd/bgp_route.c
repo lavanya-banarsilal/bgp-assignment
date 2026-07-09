@@ -3801,14 +3801,33 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 	 */
 	advertise = bgp_check_advertise(bgp, dest, safi);
 
+	/* DIAG-6a: trace entry into subgroup_process_announce_selected */
+	if (safi == SAFI_CRYPTO_ROUTES)
+		zlog_warn("DIAG-6a: subgroup_process_announce_selected peer=%s afi=%d safi=%d p=%pFX selected=%p advertise=%d",
+			  peer->host, afi, safi, p, (void *)selected, advertise);
+
 	if (selected) {
-		if (subgroup_announce_check(dest, selected, subgrp, p, pattr,
-					    NULL)) {
+		bool _check_result = subgroup_announce_check(dest, selected, subgrp, p, pattr, NULL);
+
+		/* DIAG-6b: result of subgroup_announce_check */
+		if (safi == SAFI_CRYPTO_ROUTES)
+			zlog_warn("DIAG-6b: subgroup_announce_check returned %d for peer=%s prefix=%pFX pi_flags=0x%x",
+				  _check_result, peer->host, p, selected->flags);
+
+		if (_check_result) {
 			/* Route is selected, if the route is already installed
 			 * in FIB, then it is advertised
 			 */
 			if (advertise) {
-				if (!bgp_check_withdrawal(bgp, dest, safi)) {
+				bool _withdrawal = bgp_check_withdrawal(bgp, dest, safi);
+
+				/* DIAG-6c: result of bgp_check_withdrawal */
+				if (safi == SAFI_CRYPTO_ROUTES)
+					zlog_warn("DIAG-6c: bgp_check_withdrawal=%d for peer=%s prefix=%pFX — will %s bgp_adj_out_set_subgroup",
+						  _withdrawal, peer->host, p,
+						  _withdrawal ? "SKIP" : "CALL");
+
+				if (!_withdrawal) {
 					if (!bgp_adj_out_set_subgroup(dest,
 								      subgrp,
 								      pattr,
