@@ -777,27 +777,51 @@ int bgp_nlri_parse_crypto_routes(struct peer *peer, struct attr *attr,
 		}
 
 		/*
-		 * --- B. Decode Crypto Signature TLV ---
-		 * The TLV immediately follows the prefix bytes.
-		 * pnt + psize now points at the first byte of the TLV.
+		 * --- B. Decode Crypto Signature TLV (optional) ---
+		 *
+		 * The TLV immediately follows the prefix bytes.  However,
+		 * the originator may send a bare-prefix NLRI with no TLV
+		 * (unsigned route, e.g. when no private key is configured).
+		 * In that case we treat the path as SIG_NONE and still install
+		 * it into the BGP RIB — it will be visible in "show bgp ipv4
+		 * crypto-routes" but will NOT be redistributed to the FIB
+		 * because sig_state != SIG_VERIFIED.
+		 *
+		 * Detection: if we are already at the end of the NLRI buffer,
+		 * or the next byte is not BGP_CRYPTO_SIG_TLV_TYPE (0xCE),
+		 * there is no TLV for this prefix.
+		 *
+		 * pnt + psize now points at the first byte after the prefix.
 		 */
 		uint8_t *tlv = pnt + psize;
+		bool has_tlv = (tlv + BGP_CRYPTO_TLV_FIXED_HDR_LEN <= lim)
+			       && (tlv[0] == BGP_CRYPTO_SIG_TLV_TYPE);
 
-		/* Minimum TLV: type(1) + key_id(4) + algo(1) + sig_len(2) = 8 */
-		if (tlv + BGP_CRYPTO_TLV_FIXED_HDR_LEN > lim) {
-			flog_err(EC_BGP_UPDATE_RCV,
-				 "%pBP crypto-routes NLRI: TLV header truncated for prefix %pFX",
-				 peer, &p);
-			return BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW;
+		/* --- C. Build per-path crypto extra struct --- */
+		struct bgp_path_info_extra_crypto *crypto_extra =
+			bgp_crypto_extra_new();
+
+		if (!has_tlv) {
+			/*
+			 * No TLV: unsigned route.  Install with SIG_NONE so it
+			 * appears in the BGP table.  The FIB installation gate
+			 * (sig_state == SIG_VERIFIED) in bgp_zebra.c prevents
+			 * it reaching the kernel RIB.
+			 */
+			if (BGP_DEBUG(update, UPDATE_IN))
+				zlog_debug(
+					"%pBP crypto-routes: prefix %pFX has no Crypto-SIG TLV — installing as SIG_NONE",
+					peer, &p);
+			crypto_extra->sig_state = BGP_CRYPTO_SIG_NONE;
+			bgp_update(peer, &p, 0, attr, afi,
+				   SAFI_CRYPTO_ROUTES, ZEBRA_ROUTE_BGP,
+				   BGP_ROUTE_NORMAL, NULL, NULL, 0, 0, NULL,
+				   NULL);
+			bgp_crypto_extra_free(&crypto_extra);
+			continue;
 		}
 
-		/* --- B1. TLV type byte --- */
-		if (tlv[0] != BGP_CRYPTO_SIG_TLV_TYPE) {
-			flog_err(EC_BGP_UPDATE_RCV,
-				 "%pBP crypto-routes NLRI: unexpected TLV type 0x%02X (expected 0x%02X) for prefix %pFX",
-				 peer, tlv[0], BGP_CRYPTO_SIG_TLV_TYPE, &p);
-			return BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW;
-		}
+		/* --- B1–B5. Parse the TLV fields --- */
 
 		/* --- B2. key_id (4 bytes, network order) --- */
 		uint32_t key_id_wire;
@@ -817,6 +841,7 @@ int bgp_nlri_parse_crypto_routes(struct peer *peer, struct attr *attr,
 			flog_err(EC_BGP_UPDATE_RCV,
 				 "%pBP crypto-routes NLRI: sig_len %u out of range [1,%d] for prefix %pFX",
 				 peer, sig_len, BGP_CRYPTO_SIG_MAX_LEN, &p);
+			bgp_crypto_extra_free(&crypto_extra);
 			return BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW;
 		}
 
@@ -825,6 +850,7 @@ int bgp_nlri_parse_crypto_routes(struct peer *peer, struct attr *attr,
 			flog_err(EC_BGP_UPDATE_RCV,
 				 "%pBP crypto-routes NLRI: signature truncated (need %u bytes) for prefix %pFX",
 				 peer, sig_len, &p);
+			bgp_crypto_extra_free(&crypto_extra);
 			return BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW;
 		}
 
@@ -835,19 +861,8 @@ int bgp_nlri_parse_crypto_routes(struct peer *peer, struct attr *attr,
 		psize += BGP_CRYPTO_TLV_FIXED_HDR_LEN + sig_len;
 
 		/*
-		 * sequence_no is NOT part of the TLV wire format — it is part
-		 * of the signed data that is reconstructed from the NLRI.
-		 * For Phase 2 we use the MED attribute as a sequence number
-		 * carrier if MED is present, otherwise we accept any seq_no
-		 * (implementation note: proper seq_no encoding in its own TLV
-		 * field is a Phase 3 protocol enhancement).
-		 *
-		 * Assumption (documented): The originator encodes seq_no as
-		 * a 4-byte field at offset BGP_CRYPTO_TLV_FIXED_HDR_LEN+sig_len
-		 * within the same NLRI entry.  This keeps seq_no bound to the
-		 * per-prefix NLRI rather than a per-UPDATE attribute.
-		 *
-		 * For now we read it from after the signature.
+		 * sequence_no is encoded as a 4-byte field immediately after
+		 * the signature bytes within the same NLRI entry.
 		 */
 		uint32_t sequence_no = 0;
 		if (tlv + BGP_CRYPTO_TLV_FIXED_HDR_LEN + sig_len + 4 <= lim) {
@@ -857,10 +872,6 @@ int bgp_nlri_parse_crypto_routes(struct peer *peer, struct attr *attr,
 			sequence_no = ntohl(sequence_no);
 			psize += 4;
 		}
-
-		/* --- C. Build per-path crypto extra struct --- */
-		struct bgp_path_info_extra_crypto *crypto_extra =
-			bgp_crypto_extra_new();
 
 		crypto_extra->key_id = key_id;
 		crypto_extra->sig_algo = algo;
@@ -874,8 +885,6 @@ int bgp_nlri_parse_crypto_routes(struct peer *peer, struct attr *attr,
 		 * Determine origin ASN from the AS_PATH attribute.
 		 * For eBGP the last AS in AS_PATH is the origin; for iBGP
 		 * we fall back to the peer's ASN.
-		 * aspath_rightmost() returns 0 if AS_PATH is empty (e.g.
-		 * locally originated) — in that case use peer->as.
 		 */
 		as_t origin_asn = 0;
 		if (attr->aspath)
@@ -887,37 +896,31 @@ int bgp_nlri_parse_crypto_routes(struct peer *peer, struct attr *attr,
 		bgp_crypto_verify(crypto_extra, &p, origin_asn);
 
 		/*
-		 * --- E. Install path regardless of sig_state ---
-		 * The path enters the Adj-RIB-In.  The route selection code
-		 * in bgp_route.c must skip FIB installation for paths whose
-		 * sig_state != SIG_VERIFIED.  We pass the crypto_extra as
-		 * the addpath_id extra parameter via a side channel in attr
-		 * for now (Phase 2 simplification — Phase 3 will plumb this
-		 * through bgp_path_info_extra properly).
+		 * --- E. Install path into the BGP RIB regardless of sig_state.
 		 *
-		 * For the current phase, we only install VERIFIED paths to
-		 * keep the security invariant strict.
+		 * All paths — VERIFIED, INVALID, NO_PUBKEY, PENDING — enter
+		 * the Adj-RIB-In / Loc-RIB so they are visible in "show bgp
+		 * ipv4 crypto-routes" for operational diagnostics.
+		 *
+		 * FIB installation is gated on sig_state == SIG_VERIFIED
+		 * in bgp_zebra.c (the redistribute path), keeping the security
+		 * invariant: only cryptographically authenticated routes reach
+		 * the kernel RIB.
+		 *
+		 * Logging: INVALID and NO_PUBKEY states are already logged by
+		 * bgp_crypto_verify() with a warning; debug-log the others here.
 		 */
-		if (crypto_extra->sig_state == BGP_CRYPTO_SIG_VERIFIED) {
-			/*
-			 * Store crypto_extra on the attr so bgp_update() can
-			 * find it.  bgp_update() calls bgp_path_info_new() which
-			 * allocates bgp_path_info_extra; we set .crypto there.
-			 * This coupling is resolved in Phase 3 by passing it
-			 * through a dedicated parameter.
-			 */
-			bgp_update(peer, &p, 0, attr, afi,
-				   SAFI_CRYPTO_ROUTES, ZEBRA_ROUTE_BGP,
-				   BGP_ROUTE_NORMAL, NULL, NULL, 0, 0, NULL,
-				   NULL);
-		} else {
-			if (BGP_DEBUG(update, UPDATE_IN))
-				zlog_debug(
-					"%pBP crypto-routes: prefix %pFX not installed: sig_state=%s",
-					peer, &p,
-					bgp_crypto_sig_state_str(
-						crypto_extra->sig_state));
-		}
+		if (BGP_DEBUG(update, UPDATE_IN)
+		    && crypto_extra->sig_state != BGP_CRYPTO_SIG_VERIFIED)
+			zlog_debug(
+				"%pBP crypto-routes: prefix %pFX installing with sig_state=%s",
+				peer, &p,
+				bgp_crypto_sig_state_str(crypto_extra->sig_state));
+
+		bgp_update(peer, &p, 0, attr, afi,
+			   SAFI_CRYPTO_ROUTES, ZEBRA_ROUTE_BGP,
+			   BGP_ROUTE_NORMAL, NULL, NULL, 0, 0, NULL,
+			   NULL);
 
 		bgp_crypto_extra_free(&crypto_extra);
 	}

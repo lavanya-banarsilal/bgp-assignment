@@ -1000,3 +1000,141 @@ No logic change — purely registration of the node vtysh already received comma
 from bgpd's clippy-generated `vtysh_cmd.c`.
 
 ---
+
+## Phase 11 — TEST 2 Fix: Prefix never propagates from r1 to r2
+
+**Date:** 2025-07-15
+
+### Root cause analysis
+
+The topotest established the eBGP session (TEST 1 passed) but `192.168.100.0/24`
+never appeared in r2's SAFI=200 table.  Three bugs were found operating together:
+
+#### Bug A — r1 never signs the prefix (originator side)
+
+`bgp_static_update()` in `bgp_route.c` creates the locally-originated
+`bgp_path_info` for the `network 192.168.100.0/24` statement but **never
+calls `bgp_crypto_sign()`**.  There was no `SAFI_CRYPTO_ROUTES` branch.
+Result: `new->extra->crypto == NULL` for all locally-originated routes.
+
+`bgp_crypto_routes_encode_nlri_trailer()` in `bgp_attr.c` is called when
+assembling the UPDATE packet.  Its first guard is:
+```c
+if (!path || !path->extra || !path->extra->crypto)
+    return 0;
+```
+Since `path->extra->crypto` was always NULL, it wrote **zero bytes** — just
+the bare prefix bytes, no Crypto-SIG TLV.
+
+#### Bug B — r2 errors on missing TLV, resetting the session (receiver side)
+
+`bgp_nlri_parse_crypto_routes()` in `bgp_crypto_routes.c` unconditionally
+expected a TLV after the prefix bytes.  When r1 sent a bare-prefix NLRI,
+the check `tlv + BGP_CRYPTO_TLV_FIXED_HDR_LEN > lim` fired, returning
+`BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW`.  This caused r2 to send a NOTIFY
+and reset the session.  The session then bounced repeatedly for the entire
+80-second poll window.
+
+The header's own comment explicitly stated that unsigned prefixes must
+still be encodable with `sig_state = SIG_NONE` — the parser was violating
+that design contract.
+
+Additionally, the parser only called `bgp_update()` for `SIG_VERIFIED`
+paths.  All other states (INVALID, NO_PUBKEY, PENDING) were silently
+discarded.  This meant prefixes would never appear in `show bgp ipv4
+crypto-routes` for diagnostic purposes.
+
+#### Bug C — no mechanism for r1 to know its private key path
+
+`struct bgp` had no `crypto_privkey_path` field and no VTY command to set
+it.  Even after fixing Bugs A and B, r1 would have had no private key to
+sign with.
+
+### Fixes
+
+#### Fix 1 — `bgp_crypto_routes.c`: parser tolerates missing TLV (`bgp_nlri_parse_crypto_routes`)
+
+Replaced the hard error on missing TLV with an optional TLV check:
+
+```c
+bool has_tlv = (tlv + BGP_CRYPTO_TLV_FIXED_HDR_LEN <= lim)
+               && (tlv[0] == BGP_CRYPTO_SIG_TLV_TYPE);
+```
+
+If `!has_tlv`: install the prefix with `sig_state = SIG_NONE` via
+`bgp_update()` and `continue`.  The route appears in "show bgp ipv4
+crypto-routes" but is not redistributed to the kernel FIB (FIB gating on
+`SIG_VERIFIED` is handled in `bgp_zebra.c`).
+
+Also changed: all paths (VERIFIED, INVALID, NO_PUBKEY, PENDING) now call
+`bgp_update()` so they appear in the BGP RIB for operational visibility.
+Only the FIB path is restricted to `SIG_VERIFIED`.
+
+#### Fix 2 — `bgpd.h`: add `crypto_privkey_path` and `crypto_seq_no` to `struct bgp`
+
+```c
+char    *crypto_privkey_path;  /* PEM private key for signing originated routes */
+uint32_t crypto_seq_no;        /* per-instance anti-replay sequence counter */
+```
+
+`crypto_privkey_path` is heap-allocated (XSTRDUP) and freed in `bgp_free()`.
+
+#### Fix 3 — `bgpd.c`: free `crypto_privkey_path` in `bgp_free()`
+
+Added `XFREE(MTYPE_BGP, bgp->crypto_privkey_path)` to the `bgp_free()`
+cleanup block.
+
+#### Fix 4 — `bgp_vty.c`: new VTY commands `bgp crypto-routes privkey FILENAME`
+
+Two new DEFUNs:
+- `bgp_crypto_privkey_cmd`: sets `bgp->crypto_privkey_path`, resets
+  `bgp->crypto_seq_no`.
+- `no_bgp_crypto_privkey_cmd`: clears the path.
+
+Both registered under `BGP_CRYPTO_ROUTES_NODE`.
+
+#### Fix 5 — `bgp_route.c`: sign the prefix in `bgp_static_update()` for `SAFI_CRYPTO_ROUTES`
+
+Added `#include "bgpd/bgp_crypto_routes.h"` and a new block after `info_make`:
+
+```c
+if (safi == SAFI_CRYPTO_ROUTES && bgp->crypto_privkey_path) {
+    struct bgp_path_info_extra_crypto *crypto = bgp_crypto_extra_new();
+    if (bgp_crypto_sign(crypto, p, bgp->as,
+                        ++bgp->crypto_seq_no,
+                        bgp->crypto_privkey_path) == 0)
+        new->extra->crypto = crypto;
+    else
+        bgp_crypto_extra_free(&crypto); /* sign failed, send unsigned */
+}
+```
+
+When signing succeeds, `new->extra->crypto` is non-NULL, so
+`bgp_crypto_routes_encode_nlri_trailer()` writes the full TLV on the next
+UPDATE assembly.
+
+#### Fix 6 — `bgp_route.c`: free `extra->crypto` in `bgp_path_info_extra_free()`
+
+The original `bgp_path_info_extra_free()` did not free `e->crypto`,
+causing a memory leak on every SAFI=200 path teardown.  Added:
+
+```c
+if (e->crypto)
+    bgp_crypto_extra_free(&e->crypto);
+```
+
+#### Fix 7 — `test_bgp_crypto_routes.py`: configure r1 private key after startup
+
+Updated `setup_module` to:
+1. After `tgen.start_router()` + 5 seconds, send `bgp crypto-routes privkey <path>`
+   to r1 via VTY.
+2. Pre-load r1's public key on r2 immediately (previously only done in TEST 4,
+   which ran after TEST 2 — too late for TEST 2 to see a VERIFIED route).
+3. Trigger `clear bgp ipv4 crypto-routes * soft out` on r1 so it re-originates
+   the prefix with the newly configured private key.
+
+**Without openssl** (keypair generation fails): the `else` branch waits 5 s
+and lets the unsigned prefix propagate as `SIG_NONE` — TEST 2 still passes
+because it only checks presence, not verification state.
+
+---

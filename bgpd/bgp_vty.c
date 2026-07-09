@@ -11986,6 +11986,56 @@ DEFUN(no_bgp_crypto_pubkey,
 }
 
 /*
+ * bgp crypto-routes privkey FILENAME
+ *
+ * Provision the private key that bgpd uses to sign originated crypto-routes
+ * prefixes.  Only one private key per BGP instance is supported in Phase 2.
+ * Phase 3 will allow per-prefix keys.
+ */
+DEFUN(bgp_crypto_privkey,
+      bgp_crypto_privkey_cmd,
+      "bgp crypto-routes privkey FILENAME",
+      BGP_STR
+      "Crypto-Routes address family configuration\n"
+      "Set the private key for signing originated prefixes\n"
+      "Path to PEM-encoded ECDSA private key file\n")
+{
+	VTY_DECLVAR_CONTEXT(bgp, bgp);
+	int idx_path = 3;
+	const char *path = argv[idx_path]->arg;
+
+	XFREE(MTYPE_BGP, bgp->crypto_privkey_path);
+	bgp->crypto_privkey_path = XSTRDUP(MTYPE_BGP, path);
+	bgp->crypto_seq_no = 0; /* reset sequence counter on key change */
+
+	vty_out(vty, "Crypto-routes private key set to '%s'\n", path);
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_bgp_crypto_privkey,
+      no_bgp_crypto_privkey_cmd,
+      "no bgp crypto-routes privkey",
+      NO_STR
+      BGP_STR
+      "Crypto-Routes address family configuration\n"
+      "Remove the private key for signing originated prefixes\n")
+{
+	VTY_DECLVAR_CONTEXT(bgp, bgp);
+
+	if (!bgp->crypto_privkey_path) {
+		vty_out(vty, "%% No crypto-routes private key configured\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	XFREE(MTYPE_BGP, bgp->crypto_privkey_path);
+	bgp->crypto_privkey_path = NULL;
+	bgp->crypto_seq_no = 0;
+
+	vty_out(vty, "Crypto-routes private key removed\n");
+	return CMD_SUCCESS;
+}
+
+/*
  * show bgp ipv4 crypto-routes
  * show bgp ipv6 crypto-routes
  *
@@ -23987,6 +24037,12 @@ void bgp_vty_init(void)
 	 */
 	install_element(BGP_CRYPTO_ROUTES_NODE, &bgp_crypto_pubkey_cmd);
 	install_element(BGP_CRYPTO_ROUTES_NODE, &no_bgp_crypto_pubkey_cmd);
+
+	/* bgp crypto-routes privkey: set/unset the private key for signing
+	 * locally originated crypto-routes prefixes.  Scoped to
+	 * BGP_CRYPTO_ROUTES_NODE (must be inside address-family block). */
+	install_element(BGP_CRYPTO_ROUTES_NODE, &bgp_crypto_privkey_cmd);
+	install_element(BGP_CRYPTO_ROUTES_NODE, &no_bgp_crypto_privkey_cmd);
 
 	install_element(VIEW_NODE, &show_bgp_crypto_routes_cmd);
 	install_element(VIEW_NODE, &show_bgp_crypto_pubkeys_cmd);

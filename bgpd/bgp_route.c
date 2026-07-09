@@ -84,6 +84,7 @@
 #include "bgpd/bgp_flowspec.h"
 #include "bgpd/bgp_flowspec_util.h"
 #include "bgpd/bgp_pbr.h"
+#include "bgpd/bgp_crypto_routes.h"
 
 #include "bgpd/bgp_route_clippy.c"
 
@@ -387,6 +388,10 @@ void bgp_path_info_extra_free(struct bgp_path_info_extra **extra)
 
 	if (e->labels)
 		bgp_labels_unintern(&e->labels);
+
+	/* Free per-path crypto signature metadata (SAFI_CRYPTO_ROUTES) */
+	if (e->crypto)
+		bgp_crypto_extra_free(&e->crypto);
 
 	XFREE(MTYPE_BGP_ROUTE_EXTRA, *extra);
 }
@@ -8802,6 +8807,46 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 #ifdef ENABLE_BGP_VNC
 		label = decode_label(&bgp_static->label);
 #endif
+	}
+
+	/*
+	 * SAFI_CRYPTO_ROUTES: sign the locally-originated prefix.
+	 *
+	 * If bgp->crypto_privkey_path is set, call bgp_crypto_sign() to
+	 * produce a Crypto-SIG TLV that will be written by
+	 * bgp_crypto_routes_encode_nlri_trailer() when the UPDATE packet is
+	 * assembled.  The signature binds the prefix, the originator ASN,
+	 * and an anti-replay sequence number.
+	 *
+	 * If no private key is configured, the route is still installed into
+	 * the BGP RIB and advertised — but the NLRI contains no TLV.  The
+	 * receiver treats it as SIG_NONE (visible in "show bgp ipv4
+	 * crypto-routes" but not redistributed to the kernel FIB).
+	 *
+	 * bgp->crypto_seq_no is a simple per-instance counter.  Phase 3
+	 * will move to per-prefix sequence numbers.
+	 */
+	if (safi == SAFI_CRYPTO_ROUTES && bgp->crypto_privkey_path) {
+		struct bgp_path_info_extra_crypto *crypto;
+
+		bgp_path_info_extra_get(new);
+		crypto = bgp_crypto_extra_new();
+
+		if (bgp_crypto_sign(crypto, p, bgp->as,
+				    ++bgp->crypto_seq_no,
+				    bgp->crypto_privkey_path) == 0) {
+			new->extra->crypto = crypto;
+			if (BGP_DEBUG(update, UPDATE_OUT))
+				zlog_debug(
+					"crypto-routes: signed prefix %pFX seq %u key_id 0x%08X",
+					p, bgp->crypto_seq_no,
+					crypto->key_id);
+		} else {
+			zlog_warn(
+				"crypto-routes: signing failed for prefix %pFX — advertising unsigned",
+				p);
+			bgp_crypto_extra_free(&crypto);
+		}
 	}
 
 	bgp_path_info_extra_propagate(new, &rmap_path);

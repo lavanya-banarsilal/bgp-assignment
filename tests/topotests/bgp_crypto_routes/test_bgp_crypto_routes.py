@@ -122,9 +122,46 @@ def setup_module(mod):
 
     tgen.start_router()
 
-    # Give BGP 10 seconds to establish the session
+    # Give BGP 5 seconds to establish the base session
     logger.info("Waiting for BGP session to come up...")
-    time.sleep(10)
+    time.sleep(5)
+
+    # Configure r1's private key so it can sign the originated prefix.
+    # This must be done after the router is running (it is a VTY command,
+    # not a static config file entry) because the key file path is only
+    # known after generate_keypair() runs above.
+    if _privkey_path is not None:
+        logger.info("Configuring r1 private key for crypto-routes signing: %s",
+                    _privkey_path)
+        tgen.gears["r1"].vtysh_cmd(
+            "conf t\n"
+            "router bgp 65001\n"
+            " address-family ipv4 crypto-routes\n"
+            "  bgp crypto-routes privkey {}\n"
+            " exit-address-family\n"
+            "end\n".format(_privkey_path)
+        )
+        # Load r1's public key on r2 immediately so r2 can verify the signature
+        # when the first UPDATE arrives.  (TEST 4 also loads it explicitly, but
+        # loading it here ensures TEST 2 sees a VERIFIED route, not SIG_NO_PUBKEY.)
+        if _pubkey_path is not None:
+            logger.info("Pre-loading r1 public key on r2: %s", _pubkey_path)
+            tgen.gears["r2"].vtysh_cmd(
+                "conf t\n"
+                "router bgp 65002\n"
+                " address-family ipv4 crypto-routes\n"
+                "  bgp crypto-routes pubkey 65001 {}\n"
+                " exit-address-family\n"
+                "end\n".format(_pubkey_path)
+            )
+        # Trigger a soft reset on r1 so it re-originates the prefix with
+        # the newly configured private key.  Without this, the network
+        # statement was already processed before the key was configured.
+        tgen.gears["r1"].vtysh_cmd("clear bgp ipv4 crypto-routes * soft out")
+        time.sleep(5)
+    else:
+        # No openssl — wait the usual time for the unsigned prefix to propagate
+        time.sleep(5)
 
 
 def teardown_module(mod):

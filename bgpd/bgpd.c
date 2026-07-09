@@ -5047,6 +5047,7 @@ void bgp_free(struct bgp *bgp)
 	XFREE(MTYPE_BGP_NAME, bgp->as_pretty);
 	XFREE(MTYPE_BGP_NAME, bgp->name);
 	XFREE(MTYPE_BGP_NAME, bgp->name_pretty);
+	XFREE(MTYPE_BGP, bgp->crypto_privkey_path);
 	XFREE(MTYPE_BGP_NAME, bgp->snmp_stats);
 	XFREE(MTYPE_BGP_CONFED_LIST, bgp->confed_peers);
 

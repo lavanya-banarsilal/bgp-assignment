@@ -1144,6 +1144,29 @@ struct bgp {
 	uint64_t node_already_on_queue;
 	uint64_t node_deferred_on_queue;
 
+	/*
+	 * Crypto-routes private key path (SAFI_CRYPTO_ROUTES origination).
+	 *
+	 * Set via "bgp crypto-routes privkey FILENAME" inside the
+	 * address-family ipv4/ipv6 crypto-routes block.  When non-NULL,
+	 * bgp_static_update() calls bgp_crypto_sign() to produce a
+	 * Crypto-SIG TLV for each originated prefix.
+	 *
+	 * Heap-allocated (XSTRDUP); freed in bgp_delete() and when the
+	 * operator issues "no bgp crypto-routes privkey".
+	 * NULL means no signing is performed — routes propagate unsigned
+	 * (SIG_NONE on the receiver).
+	 */
+	char *crypto_privkey_path;
+
+	/* Per-prefix sequence counter for crypto-routes signing.
+	 * Monotonically increasing; starts at 1.  Stored per BGP instance
+	 * rather than per prefix for simplicity in Phase 2.  Phase 3 will
+	 * track per-prefix sequence numbers in bgp_static to allow
+	 * independent replay windows per prefix.
+	 */
+	uint32_t crypto_seq_no;
+
 	QOBJ_FIELDS;
 };
 DECLARE_QOBJ_TYPE(bgp);
