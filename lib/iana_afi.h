@@ -41,7 +41,7 @@ typedef enum {
 	IANA_SAFI_UNREACH = 81,
 	IANA_SAFI_MPLS_VPN = 128,
 	IANA_SAFI_FLOWSPEC = 133,
-	IANA_SAFI_CRYPTO_ROUTES = 200    /* Crypto-Routes (private/experimental use range) */
+	IANA_SAFI_CRYPTO_ROUTES = 241    /* Crypto-Routes — RFC 4760 §5 private-use range 241-254 */
 } iana_safi_t;
 
 static inline afi_t afi_iana2int(iana_afi_t afi)

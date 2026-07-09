@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Unit tests for BGP crypto-routes SAFI (SAFI 200).
+ * Unit tests for BGP crypto-routes SAFI (SAFI 241).
  *
  * Tests the wire-format encode/decode path introduced in
  * bgpd/bgp_crypto_routes.c without requiring a live network.
@@ -22,7 +22,7 @@
  *  T7  NLRI parse: returns BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW when
  *      TLV type byte is wrong (not 0xCE).
  *  T8  key_id: SHA-256 truncation produces a stable 4-byte ID.
- *  T9  SAFI value: SAFI_CRYPTO_ROUTES == 10, IANA_SAFI_CRYPTO_ROUTES == 200.
+ *  T9  SAFI value: SAFI_CRYPTO_ROUTES == 10, IANA_SAFI_CRYPTO_ROUTES == 241.
  *  T10 afindex: BGP_AF_IPV4_CRYPTO_ROUTES and BGP_AF_IPV6_CRYPTO_ROUTES
  *      return distinct, in-range indices from afindex().
  *
@@ -259,8 +259,8 @@ static void test_safi_constants(void)
 {
 	CHECK("T8: SAFI_CRYPTO_ROUTES == 10",
 	      SAFI_CRYPTO_ROUTES == 10);
-	CHECK("T8: IANA_SAFI_CRYPTO_ROUTES == 200",
-	      IANA_SAFI_CRYPTO_ROUTES == 200);
+	CHECK("T8: IANA_SAFI_CRYPTO_ROUTES == 241",
+	      IANA_SAFI_CRYPTO_ROUTES == 241);
 }
 
 /* ── T9: TLV type constant ──────────────────────────────────────────────── */

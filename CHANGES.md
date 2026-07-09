@@ -475,8 +475,8 @@ only for genuine CLI parse errors.
 
 - All changes are additive. Routers not configured for `address-family * crypto-routes`
   are completely unaffected.
-- The SAFI 200 capability is only advertised when the address family is explicitly
-  configured. Peers that do not recognise SAFI 200 will not activate it (RFC 5492).
+- The SAFI 241 capability is only advertised when the address family is explicitly
+  configured. Peers that do not recognise SAFI 241 will not activate it (RFC 5492).
 - `SAFI_MAX` bumped from 10→11 and `BGP_AF_MAX` from 16→18. All
   `[AFI_MAX][SAFI_MAX]` arrays in `struct bgp` and `struct peer` automatically
   gain the new slot — no manual array resizing needed anywhere else.
@@ -1165,7 +1165,7 @@ Consequence: the path was inserted into `bgp->rib[AFI_IP][SAFI_CRYPTO_ROUTES]` b
 `bgp_path_info_to_network_sendable()` at line 2481 immediately returned `false`
 (`!CHECK_FLAG(pi->flags, BGP_PATH_VALID)`), so the prefix was **never batched into
 an UPDATE packet**.  The session established, but zero UPDATE messages were generated
-for SAFI 200.  This explains the full 80-second timeout with no log activity.
+for SAFI 241.  This explains the full 80-second timeout with no log activity.
 
 #### Bug 2 — `bgp_crypto_privkey_cmd` did not re-sign existing static routes
 
@@ -1490,7 +1490,7 @@ Result: the route was in r1's RIB with `BGP_PATH_VALID` and `BGP_PATH_SELECTED`
 set, the update-group existed, the coalesce timer fired — but `subgroup_announce_check`
 returned `false` for every route, so `bgp_adj_out_set_subgroup()` was never called,
 the adv FIFO was always empty, `subgroup_update_packet()` found nothing to encode, and
-zero UPDATE messages were ever sent for SAFI 200.
+zero UPDATE messages were ever sent for SAFI 241.
 
 #### Why DIAG-5a appeared to show "no subgroups"
 
@@ -1540,8 +1540,8 @@ the topotest suite for exactly this scenario.
 ```
 
 All 5 tests pass:
-- TEST 1: eBGP session Established with SAFI 200 negotiated ✅
-- TEST 2: 192.168.100.0/24 present in r2's SAFI 200 table ✅
+- TEST 1: eBGP session Established with SAFI 241 negotiated ✅
+- TEST 2: 192.168.100.0/24 present in r2's SAFI 241 table ✅
 - TEST 3: `show bgp ipv4 crypto-routes` on r2 shows prefix ✅
 - TEST 4: Public key loaded and visible in `show bgp crypto-routes pubkeys` ✅
 - TEST 5: Prefix re-advertised within 5 s after `clear bgp *` ✅

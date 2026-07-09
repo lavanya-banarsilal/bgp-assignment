@@ -37,7 +37,7 @@ TestCryptoRoutes.okfail("T7: NLRI parse wrong TLV type returns OVERFLOW")
 
 # ── T8–T9: Constants ─────────────────────────────────────────────────────────
 TestCryptoRoutes.okfail("T8: SAFI_CRYPTO_ROUTES == 10")
-TestCryptoRoutes.okfail("T8: IANA_SAFI_CRYPTO_ROUTES == 200")
+TestCryptoRoutes.okfail("T8: IANA_SAFI_CRYPTO_ROUTES == 241")
 TestCryptoRoutes.okfail("T9: BGP_CRYPTO_SIG_TLV_TYPE == 0xCE")
 
 # ── T10: afindex ─────────────────────────────────────────────────────────────

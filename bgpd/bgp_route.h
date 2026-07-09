@@ -285,7 +285,7 @@ struct bgp_path_info_extra {
 	 *
 	 * NULL for all non-crypto-routes paths — no memory overhead for
 	 * existing SAFIs.  Lazily allocated in bgp_nlri_parse_crypto_routes()
-	 * when a SAFI=200 NLRI is received and freed in
+	 * when a SAFI=241 NLRI is received and freed in
 	 * bgp_path_info_extra_free().
 	 *
 	 * Phase 1: contains decoded TLV fields (key_id, sig, seq_no) and

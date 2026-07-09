@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * BGP Crypto-Routes SAFI (SAFI 200) — per-path signature metadata and
+ * BGP Crypto-Routes SAFI (SAFI 241) — per-path signature metadata and
  * originator public-key cache.
  *
  * Design notes

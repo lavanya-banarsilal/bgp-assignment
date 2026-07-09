@@ -222,7 +222,7 @@ def test_bgp_session_established():
 
 def test_crypto_routes_prefix_received():
     """
-    TEST 2 — r2 must have 192.168.100.0/24 in its BGP table for SAFI 200.
+    TEST 2 — r2 must have 192.168.100.0/24 in its BGP table for SAFI 241.
     The prefix is originated by r1 under address-family crypto-routes.
 
     Uses plain-text matching against "show bgp ipv4 crypto-routes" because
@@ -233,7 +233,7 @@ def test_crypto_routes_prefix_received():
     if tgen.routers_have_failure():
         pytest.skip(tgen.errors)
 
-    logger.info("TEST 2: Checking 192.168.100.0/24 is in r2 BGP table SAFI 200")
+    logger.info("TEST 2: Checking 192.168.100.0/24 is in r2 BGP table SAFI 241")
 
     def _check():
         output = tgen.gears["r2"].vtysh_cmd("show bgp ipv4 crypto-routes")

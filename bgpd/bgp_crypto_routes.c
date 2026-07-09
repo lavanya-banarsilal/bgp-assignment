@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * BGP Crypto-Routes SAFI (SAFI 200) — implementation.
+ * BGP Crypto-Routes SAFI (SAFI 241) — implementation.
  *
  * This file contains:
  *   - Global public-key cache lifecycle (init/finish/load/unload/lookup)

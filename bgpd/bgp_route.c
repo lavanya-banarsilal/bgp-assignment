@@ -19315,7 +19315,7 @@ void bgp_route_init(void)
 	install_element(BGP_IPV4L_NODE, &aggregate_addressv4_cmd);
 
 	/*
-	 * crypto-routes (SAFI 200) — IPv4 and IPv6 network origination.
+	 * crypto-routes (SAFI 241) — IPv4 and IPv6 network origination.
 	 *
 	 * bgp_network_cmd / ipv6_bgp_network_cmd both call bgp_static_set()
 	 * with bgp_node_safi(vty) which returns SAFI_CRYPTO_ROUTES when

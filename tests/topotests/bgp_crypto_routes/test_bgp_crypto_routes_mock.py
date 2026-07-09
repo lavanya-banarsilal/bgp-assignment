@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
 """
-test_bgp_crypto_routes_mock.py — VTY-socket-based tests for BGP SAFI 200
+test_bgp_crypto_routes_mock.py — VTY-socket-based tests for BGP SAFI 241
                                   (crypto-routes), no network namespaces needed.
 
 Why this file exists
@@ -130,7 +130,7 @@ def require_bgpd():
 
 class TestCryptoRoutesMock:
     """
-    Functional tests for BGP SAFI 200 (crypto-routes) against a live bgpd.
+    Functional tests for BGP SAFI 241 (crypto-routes) against a live bgpd.
 
     These mirror the 5 assertions in test_bgp_crypto_routes.py but run against
     a single bgpd instance via the VTY socket instead of a two-router namespace
