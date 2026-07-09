@@ -1302,3 +1302,125 @@ uses a similar look-up-and-attach approach.
 | `frr/CHANGES.md` | This entry |
 
 ---
+
+## Phase 14 — TEST 2 Root Cause: bgpd crashes with assert() when building UPDATE for SAFI_CRYPTO_ROUTES
+
+**Date:** 2025-07-16
+
+### Diagnosis
+
+Despite all previous fixes (BGP_PATH_VALID set, signing in both new-path and existing-path branches, re-sign walk on privkey config, parser tolerating SIG_NONE), TEST 2 still failed — r2 received nothing for the full 80-second poll window. The session establishment worked (TEST 1 passed), meaning the crash was not at open/capability time, but specifically when r1 tried to build the first UPDATE packet for SAFI_CRYPTO_ROUTES.
+
+#### Root cause — `bgp_packet_mpattr_start()`: `nh_afi = AFI_UNSPEC` → assert abort
+
+`bgp_packet_mpattr_start()` in `bgp_attr.c` determines the nexthop AFI via this logic (line 4909):
+
+```c
+if (afi == AFI_IP
+    && (safi == SAFI_UNICAST || safi == SAFI_LABELED_UNICAST
+        || safi == SAFI_MPLS_VPN || safi == SAFI_MULTICAST))
+    nh_afi = peer_cap_enhe(peer, afi, safi) ? AFI_IP6 : AFI_IP;
+else if (safi == SAFI_FLOWSPEC || safi == SAFI_UNREACH)
+    nh_afi = afi;
+else if (safi == SAFI_BGP_LS)
+    nh_afi = ...;
+else
+    nh_afi = BGP_NEXTHOP_AFI_FROM_NHLEN(attr->mp_nexthop_len);
+```
+
+`SAFI_CRYPTO_ROUTES` is not in any of the explicit conditions, so it falls to the `else` branch:
+
+```c
+nh_afi = BGP_NEXTHOP_AFI_FROM_NHLEN(attr->mp_nexthop_len);
+```
+
+For an IPv4 static route (`network` statement), `attr->mp_nexthop_len` is **0**. This is correct — for AFI_IP paths the nexthop is carried in `attr->nexthop` (the `BGP_ATTR_NEXT_HOP` attribute), and `mp_nexthop_len` is only set for IPv6/MP paths. The macro:
+
+```c
+#define BGP_NEXTHOP_AFI_FROM_NHLEN(nhlen)   \
+    ((nhlen) < IPV4_MAX_BYTELEN             \
+         ? 0                                \
+         : ((nhlen) < IPV6_MAX_BYTELEN ? AFI_IP : AFI_IP6))
+```
+
+`BGP_NEXTHOP_AFI_FROM_NHLEN(0) = 0 = AFI_UNSPEC`.
+
+Then the `switch(nh_afi)` lower down has:
+
+```c
+case AFI_BGP_LS:
+case AFI_UNSPEC:
+case AFI_MAX:
+    assert(!"DEV ESCAPE: AFI_BGP_LS, AFI_UNSPEC or AFI_MAX should not be used here");
+```
+
+**bgpd aborts with an assertion failure on r1 every single time it tries to send an UPDATE for SAFI_CRYPTO_ROUTES.** The session then restarts (hold timer / TCP close), r1 reconnects, tries to send the UPDATE again during the initial table walk, crashes again — ad infinitum for the full 80-second test window.
+
+#### Why this wasn't caught by TEST 1
+
+Session establishment (OPEN messages, capability negotiation) does not call `bgp_packet_mpattr_start()` — that is only called during UPDATE packet construction. TEST 1 only checks that the session is `Established`, which happens before any UPDATEs are sent. So TEST 1 passes, then the assert fires on the first UPDATE attempt, TEST 2 sees nothing.
+
+#### Full call chain for the crash
+
+```
+bgp_announce_peer()
+  → bgp_announce_route()
+    → update_group_af_walk(group_announce_route_walkcb)
+      → subgroup_announce_route()  [subgrp coalesce timer fires]
+        → subgroup_announce_table()
+          → bgp_check_selected()         [BGP_PATH_SELECTED set ✅]
+          → subgroup_process_announce_selected()
+            → bgp_adj_out_set_subgroup()
+              → bgp_write_update()
+                → bgp_packet_write_update()
+                  → bgp_packet_mpattr_start()   ← assert fires here
+```
+
+### Fix
+
+**File:** `frr/bgpd/bgp_attr.c`  
+**Change:** Add `|| safi == SAFI_CRYPTO_ROUTES` to the explicit first condition so that `AFI_IP / SAFI_CRYPTO_ROUTES` receives `nh_afi = AFI_IP` (or `AFI_IP6` if ENHE is active — correct for the future IPv6 crypto-routes case).
+
+```c
+/* Before (line 4909): */
+if (afi == AFI_IP
+    && (safi == SAFI_UNICAST || safi == SAFI_LABELED_UNICAST
+        || safi == SAFI_MPLS_VPN || safi == SAFI_MULTICAST))
+    nh_afi = peer_cap_enhe(peer, afi, safi) ? AFI_IP6 : AFI_IP;
+
+/* After: */
+if (afi == AFI_IP
+    && (safi == SAFI_UNICAST || safi == SAFI_LABELED_UNICAST
+        || safi == SAFI_MPLS_VPN || safi == SAFI_MULTICAST
+        || safi == SAFI_CRYPTO_ROUTES))
+    nh_afi = peer_cap_enhe(peer, afi, safi) ? AFI_IP6 : AFI_IP;
+```
+
+With `nh_afi = AFI_IP`, the `switch(nh_afi)` reaches:
+```c
+case AFI_IP:
+    switch (safi) {
+    case SAFI_CRYPTO_ROUTES:     /* already present, falls through to: */
+    case SAFI_UNICAST:
+    case SAFI_MULTICAST:
+    case SAFI_LABELED_UNICAST:
+        stream_putc(s, 4);
+        stream_put_ipv4(s, attr->nexthop.s_addr);  /* 0.0.0.0 */
+        break;
+    ...
+```
+
+`attr->nexthop.s_addr` is `INADDR_ANY` (0.0.0.0) because `subgroup_announce_check()` called `subgroup_announce_reset_nhop(AF_INET, attr)` for the eBGP NHOP substitution. Then `bpacket_reformat_for_peer()` replaces the 0.0.0.0 with `peer->nexthop.v4` (r1's interface address toward r2) — the standard eBGP nexthop substitution at `bgp_updgrp_packet.c:420-422`. The UPDATE packet is now correctly formed and r2 receives the prefix.
+
+### Why the existing `case SAFI_CRYPTO_ROUTES` in the AFI_IP nexthop write switch was correct but unreachable
+
+The `case SAFI_CRYPTO_ROUTES: fallthrough;` at line 4927 in the `AFI_IP` nexthop-write switch was added in Phase 5 and was the right intent. However, `nh_afi` was never reaching `AFI_IP` due to the missing condition in the preceding `if` — that `case` was unreachable dead code. This fix makes it live.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `frr/bgpd/bgp_attr.c` | `SAFI_CRYPTO_ROUTES` added to the `nh_afi = AFI_IP` condition in `bgp_packet_mpattr_start()` |
+| `frr/CHANGES.md` | This entry |
+
+---

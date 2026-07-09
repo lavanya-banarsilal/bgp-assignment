@@ -4908,7 +4908,8 @@ size_t bgp_packet_mpattr_start(struct stream *s, struct peer *peer, afi_t afi,
 	/* Nexthop AFI */
 	if (afi == AFI_IP
 	    && (safi == SAFI_UNICAST || safi == SAFI_LABELED_UNICAST
-		|| safi == SAFI_MPLS_VPN || safi == SAFI_MULTICAST))
+		|| safi == SAFI_MPLS_VPN || safi == SAFI_MULTICAST
+		|| safi == SAFI_CRYPTO_ROUTES))
 		nh_afi = peer_cap_enhe(peer, afi, safi) ? AFI_IP6 : AFI_IP;
 	else if (safi == SAFI_FLOWSPEC || safi == SAFI_UNREACH)
 		nh_afi = afi;
