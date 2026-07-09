@@ -922,7 +922,62 @@ int bgp_nlri_parse_crypto_routes(struct peer *peer, struct attr *attr,
 			   BGP_ROUTE_NORMAL, NULL, NULL, 0, 0, NULL,
 			   NULL);
 
-		bgp_crypto_extra_free(&crypto_extra);
+		/*
+		 * --- F. Attach crypto metadata to the installed bgp_path_info.
+		 *
+		 * bgp_update() has no parameter for per-path SAFI metadata, so
+		 * we look up the newly installed/updated path and store
+		 * crypto_extra directly on its extra->crypto field.
+		 *
+		 * bgp_safi_node_lookup() returns the dest with its reference
+		 * count incremented; we must call bgp_dest_unlock_node() after.
+		 *
+		 * We locate the specific path_info by matching peer pointer,
+		 * route type (ZEBRA_ROUTE_BGP), and sub_type (BGP_ROUTE_NORMAL)
+		 * — the same matching logic used throughout bgp_route.c.
+		 *
+		 * If the lookup fails (e.g. bgp_update() filtered the route)
+		 * we simply free crypto_extra; the path is not in the RIB so
+		 * there is nothing to attach to.
+		 */
+		{
+			struct bgp *bgp = peer->bgp;
+			struct bgp_dest *installed_dest;
+			struct bgp_path_info *found_pi;
+
+			installed_dest = bgp_safi_node_lookup(
+				bgp->rib[afi][SAFI_CRYPTO_ROUTES],
+				SAFI_CRYPTO_ROUTES, &p, NULL);
+
+			if (installed_dest) {
+				found_pi = NULL;
+				for (struct bgp_path_info *cpi =
+					     bgp_dest_get_bgp_path_info(
+						     installed_dest);
+				     cpi; cpi = cpi->next) {
+					if (cpi->peer == peer
+					    && cpi->type == ZEBRA_ROUTE_BGP
+					    && cpi->sub_type
+						       == BGP_ROUTE_NORMAL) {
+						found_pi = cpi;
+						break;
+					}
+				}
+
+				if (found_pi) {
+					bgp_path_info_extra_get(found_pi);
+					/* Replace any stale crypto struct */
+					bgp_crypto_extra_free(
+						&found_pi->extra->crypto);
+					found_pi->extra->crypto = crypto_extra;
+					crypto_extra = NULL; /* ownership transferred */
+				}
+				bgp_dest_unlock_node(installed_dest);
+			}
+
+			/* Free if not transferred (filtered route, lookup fail) */
+			bgp_crypto_extra_free(&crypto_extra);
+		}
 	}
 
 	return BGP_NLRI_PARSE_OK;

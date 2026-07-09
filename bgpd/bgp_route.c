@@ -8736,6 +8736,48 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 			pi->attr = attr_new;
 			pi->uptime = monotime(NULL);
 			bgp_path_info_extra_propagate(pi, &rmap_path);
+
+			/*
+			 * SAFI_CRYPTO_ROUTES — re-sign the existing path.
+			 *
+			 * This branch is reached when bgp_crypto_privkey_cmd
+			 * re-walks the static table (BGP_FLAG_FORCE_STATIC_PROCESS
+			 * bypasses the early-exit).  The existing pi was created
+			 * before the private key was configured, so pi->extra->crypto
+			 * is NULL or contains a stale signature.  Re-sign here so the
+			 * next bgp_process() call generates an UPDATE with the
+			 * Crypto-SIG TLV.
+			 *
+			 * bgp_path_info_extra_get(pi) is idempotent — it only
+			 * allocates if pi->extra is NULL.
+			 */
+			if (safi == SAFI_CRYPTO_ROUTES && bgp->crypto_privkey_path) {
+				struct bgp_path_info_extra_crypto *old_crypto;
+				struct bgp_path_info_extra_crypto *new_crypto;
+
+				bgp_path_info_extra_get(pi);
+				old_crypto = pi->extra->crypto;
+				pi->extra->crypto = NULL; /* detach before free */
+				bgp_crypto_extra_free(&old_crypto);
+
+				new_crypto = bgp_crypto_extra_new();
+				if (bgp_crypto_sign(new_crypto, p, bgp->as,
+						    ++bgp->crypto_seq_no,
+						    bgp->crypto_privkey_path) == 0) {
+					pi->extra->crypto = new_crypto;
+					if (BGP_DEBUG(update, UPDATE_OUT))
+						zlog_debug(
+							"crypto-routes: re-signed prefix %pFX seq %u key_id 0x%08X (existing path update)",
+							p, bgp->crypto_seq_no,
+							new_crypto->key_id);
+				} else {
+					zlog_warn(
+						"crypto-routes: re-sign failed for prefix %pFX — advertising unsigned",
+						p);
+					bgp_crypto_extra_free(&new_crypto);
+				}
+			}
+
 #ifdef ENABLE_BGP_VNC
 			if ((afi == AFI_IP || afi == AFI_IP6) &&
 			    safi == SAFI_UNICAST) {
@@ -8873,6 +8915,9 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 	bgp_aggregate_increment(bgp, p, new, afi, safi);
 
 	/* Process change. */
+	if (safi == SAFI_CRYPTO_ROUTES)
+		zlog_debug("crypto-routes: calling bgp_process for prefix=%pFX flags=0x%x",
+			   p, new->flags);
 	bgp_process(bgp, dest, new, afi, safi);
 
 	/* route_node_get lock */

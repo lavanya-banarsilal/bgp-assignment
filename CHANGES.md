@@ -1204,3 +1204,101 @@ for both AFI_IP and AFI_IP6, calling `bgp_static_update()` on each entry under
 This triggers re-signing and `bgp_process()` → new UPDATE.
 
 ---
+
+## Phase 13 — TEST 2 Fix (continued): Two remaining bugs after Phase 12
+
+**Date:** 2025-07-15
+
+### Root cause analysis
+
+Phase 12 set `BGP_PATH_VALID` for SAFI_CRYPTO_ROUTES static routes and added a
+re-sign walk in `bgp_crypto_privkey_cmd`. TEST 2 still fails because two cooperating
+bugs remain:
+
+#### Bug 1 — Re-sign walk never signs: `bgp_static_update()` existing-path branch has no signing logic
+
+The `bgp_crypto_privkey_cmd` re-sign walk calls `bgp_static_update()` with
+`BGP_FLAG_FORCE_STATIC_PROCESS` set. Because `pi != NULL` (the path was already
+created during initial config load), execution goes into the **existing-path update
+branch** (lines 8710–8792). This branch:
+- updates attributes, calls `bgp_nexthop_reachability_check()`, calls `bgp_process()` ✅
+- **never calls `bgp_crypto_sign()`** ❌
+
+The signing block added in Phase 11 (Fix 5) is only in the **`!pi` (new path) branch**.
+At config load time, `bgp->crypto_privkey_path == NULL` so signing is skipped there too.
+Result: `pi->extra->crypto` is **always NULL** when the privkey re-sign walk triggers
+`bgp_process()`. The UPDATE is sent, but `bgp_crypto_routes_encode_nlri_trailer()`
+finds `path->extra->crypto == NULL` and writes zero bytes — r2 receives a bare prefix
+with no Crypto-SIG TLV, SIG_NONE.
+
+The SIG_NONE prefix IS installed in r2's BGP table (Phase 11 fix 1 ensures this),
+so `show bgp ipv4 crypto-routes` SHOULD show it — but only if the UPDATE reaches r2.
+The real question is whether TEST 2 was failing because:
+(a) No UPDATE at all (pre-Phase 12: `BGP_PATH_VALID` never set), or
+(b) UPDATE sent but unsigned, but for some other reason not seen.
+
+Phase 12 fixed (a). This bug means the UPDATE will be sent but unsigned. Since TEST 2
+only checks prefix presence (not sig_state), an unsigned prefix arriving at r2 with
+SIG_NONE is sufficient to pass TEST 2. However, signing is still needed for correctness
+and for TESTe 4/5 (pubkey verification).
+
+**Fix (bgp_route.c):** Added re-sign block in the existing-path update branch, immediately
+after `bgp_path_info_extra_propagate()` and before `bgp_nexthop_reachability_check()`:
+
+```c
+if (safi == SAFI_CRYPTO_ROUTES && bgp->crypto_privkey_path) {
+    struct bgp_path_info_extra_crypto *old_crypto;
+    struct bgp_path_info_extra_crypto *new_crypto;
+
+    bgp_path_info_extra_get(pi);
+    old_crypto = pi->extra->crypto;
+    pi->extra->crypto = NULL;        /* detach before free */
+    bgp_crypto_extra_free(&old_crypto);
+
+    new_crypto = bgp_crypto_extra_new();
+    if (bgp_crypto_sign(new_crypto, p, bgp->as,
+                        ++bgp->crypto_seq_no,
+                        bgp->crypto_privkey_path) == 0) {
+        pi->extra->crypto = new_crypto;
+    } else {
+        bgp_crypto_extra_free(&new_crypto);
+    }
+}
+```
+
+`bgp_path_info_extra_get(pi)` is idempotent — allocates only if `pi->extra` is NULL.
+
+#### Bug 2 — Received `crypto_extra` allocated, verified, then immediately freed without being stored
+
+In `bgp_nlri_parse_crypto_routes()` (bgp_crypto_routes.c), the parser:
+1. Allocates `bgp_path_info_extra_crypto *crypto_extra`
+2. Parses TLV fields into it
+3. Calls `bgp_crypto_verify()` to compute `sig_state`
+4. Calls `bgp_update()` to install the path — **but `bgp_update()` has no parameter for per-path extra metadata**
+5. Calls `bgp_crypto_extra_free(&crypto_extra)` — **immediately frees the struct**
+
+Result: every received SAFI_CRYPTO_ROUTES path has `pi->extra->crypto == NULL`. The
+signature state (VERIFIED/INVALID/NO_PUBKEY) computed in step 3 is discarded. This does
+NOT prevent the prefix from appearing in `show bgp ipv4 crypto-routes` (the VTY handler
+handles NULL crypto gracefully), but it does prevent correct signature-state display and
+prevents FIB gating on `SIG_VERIFIED`.
+
+**Fix (bgp_crypto_routes.c):** After `bgp_update()` returns, look up the installed
+`bgp_dest` via `bgp_safi_node_lookup()`, walk its path_info list to find the path from
+this peer, call `bgp_path_info_extra_get()`, and store `crypto_extra` in `extra->crypto`.
+Ownership of `crypto_extra` is transferred to the path; the fallback `bgp_crypto_extra_free()`
+at the end of the block is a no-op when the pointer was transferred (set to NULL).
+
+This is the same post-install-attachment pattern used by `SAFI_UNREACH` in `bgp_route.c`
+lines 6664–6678, which also cannot pass its per-path data through `bgp_update()` and
+uses a similar look-up-and-attach approach.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `frr/bgpd/bgp_route.c` | Re-sign block added in existing-path update branch of `bgp_static_update()` |
+| `frr/bgpd/bgp_crypto_routes.c` | crypto_extra attached to installed path after `bgp_update()` |
+| `frr/CHANGES.md` | This entry |
+
+---
