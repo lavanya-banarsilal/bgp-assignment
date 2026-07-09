@@ -62,7 +62,7 @@ import pytest
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-VTY_SOCKET = "/var/run/frr/bgpd.vty"
+VTY_SOCKET = "/var/run/frr/"
 VTYSH_BIN  = "/usr/bin/vtysh"
 PUBKEY_PEM = "/tmp/test_pubkey.pem"
 ORIGIN_ASN = "65001"
