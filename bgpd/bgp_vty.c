@@ -12003,10 +12003,40 @@ DEFUN(bgp_crypto_privkey,
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	int idx_path = 3;
 	const char *path = argv[idx_path]->arg;
+	struct bgp_dest *dest;
+	struct bgp_static *bgp_static;
+	afi_t afi;
 
 	XFREE(MTYPE_BGP, bgp->crypto_privkey_path);
 	bgp->crypto_privkey_path = XSTRDUP(MTYPE_BGP, path);
 	bgp->crypto_seq_no = 0; /* reset sequence counter on key change */
+
+	/*
+	 * Re-process all existing SAFI_CRYPTO_ROUTES static routes so they
+	 * get signed with the newly configured private key.
+	 *
+	 * bgp_static_update() is called with BGP_FLAG_FORCE_STATIC_PROCESS
+	 * so it overwrites the existing (unsigned) path_info even when
+	 * attributes have not changed.  This triggers bgp_process() which
+	 * in turn generates a new UPDATE to all activated peers.
+	 *
+	 * Without this walk the VTY command would store the key path but
+	 * the existing RIB entries would keep extra->crypto == NULL and
+	 * never produce a signed TLV.
+	 */
+	SET_FLAG(bgp->flags, BGP_FLAG_FORCE_STATIC_PROCESS);
+	for (afi = AFI_IP; afi <= AFI_IP6; afi++) {
+		for (dest = bgp_table_top(bgp->static_routes[afi][SAFI_CRYPTO_ROUTES]);
+		     dest; dest = bgp_route_next(dest)) {
+			bgp_static = bgp_dest_get_bgp_static_info(dest);
+			if (!bgp_static)
+				continue;
+			bgp_static_update(bgp, bgp_dest_get_prefix(dest),
+					  bgp_static, afi,
+					  SAFI_CRYPTO_ROUTES);
+		}
+	}
+	UNSET_FLAG(bgp->flags, BGP_FLAG_FORCE_STATIC_PROCESS);
 
 	vty_out(vty, "Crypto-routes private key set to '%s'\n", path);
 	return CMD_SUCCESS;

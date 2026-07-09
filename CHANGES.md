@@ -1138,3 +1138,69 @@ and lets the unsigned prefix propagate as `SIG_NONE` — TEST 2 still passes
 because it only checks presence, not verification state.
 
 ---
+
+## Phase 12 — TEST 2 Root Cause: BGP_PATH_VALID never set + privkey re-sign
+
+**Date:** 2025-07-15
+
+### Diagnosis
+
+Even after Phase 11, TEST 2 still failed (prefix never appeared on r2 after 80 s).
+Two cooperating bugs were found by reading the origination code path in full.
+
+#### Bug 1 — `BGP_PATH_VALID` never set for `SAFI_CRYPTO_ROUTES` (fatal)
+
+`bgp_static_update()` in `bgp_route.c` creates the `bgp_path_info` for every
+`network` statement.  After `info_make()`, the flag `BGP_PATH_VALID` must be set
+so the update group machinery will include the path in outbound UPDATEs.
+
+`bgp_nexthop_reachability_check()` — called at the end of `bgp_static_update()` —
+only sets `BGP_PATH_VALID` for `SAFI_UNICAST` and `SAFI_LABELED_UNICAST` (source:
+`bgp_route.c:8518`).  For every other SAFI it is a no-op.
+
+The MPLS/EVPN path handles this with an explicit `SET_FLAG(new->flags, BGP_PATH_VALID)`
+at line 8800.  `SAFI_CRYPTO_ROUTES` had no such line.
+
+Consequence: the path was inserted into `bgp->rib[AFI_IP][SAFI_CRYPTO_ROUTES]` but
+`bgp_path_info_to_network_sendable()` at line 2481 immediately returned `false`
+(`!CHECK_FLAG(pi->flags, BGP_PATH_VALID)`), so the prefix was **never batched into
+an UPDATE packet**.  The session established, but zero UPDATE messages were generated
+for SAFI 200.  This explains the full 80-second timeout with no log activity.
+
+#### Bug 2 — `bgp_crypto_privkey_cmd` did not re-sign existing static routes
+
+The setup flow is:
+1. bgpd starts, reads bgpd.conf, calls `bgp_static_update()` for `network 192.168.100.0/24`.
+   At this point `bgp->crypto_privkey_path == NULL` → no signing, `extra->crypto == NULL`.
+2. 5 seconds later the topotest VTY sends `bgp crypto-routes privkey <path>`.
+   The old implementation stored the key path but never revisited the existing RIB entries.
+3. `clear bgp *` resets the session.  On re-establishment `bgp_announce_route()` walks
+   the existing RIB entries.  Those entries were created in step 1 with `extra->crypto == NULL`
+   — no TLV is written, the NLRI is unsigned (SIG_NONE on the receiver).
+
+With Bug 1 fixed, the route would now be advertised — but still unsigned.  With Bug 2
+also fixed, the `privkey` command triggers `bgp_static_update()` on all existing
+`SAFI_CRYPTO_ROUTES` static entries, which re-signs them and calls `bgp_process()` to
+generate a fresh UPDATE with the Crypto-SIG TLV.  The `clear bgp *` in `setup_module`
+is therefore no longer strictly needed (the re-sign + re-process already triggers a new
+UPDATE), but it is kept as belt-and-suspenders.
+
+### Fixes
+
+#### Fix 1 — `bgp_route.c`: set `BGP_PATH_VALID` for `SAFI_CRYPTO_ROUTES` in `bgp_static_update()`
+
+Added immediately after the MPLS_VPN/ENCAP/EVPN block:
+```c
+if (safi == SAFI_CRYPTO_ROUTES)
+    SET_FLAG(new->flags, BGP_PATH_VALID);
+```
+Follows the identical pattern used by EVPN/VPN at line 8800.
+
+#### Fix 2 — `bgp_vty.c`: re-process static routes on `bgp crypto-routes privkey`
+
+Updated `bgp_crypto_privkey_cmd` to walk `bgp->static_routes[afi][SAFI_CRYPTO_ROUTES]`
+for both AFI_IP and AFI_IP6, calling `bgp_static_update()` on each entry under
+`BGP_FLAG_FORCE_STATIC_PROCESS` (so it overwrites even unchanged-attribute paths).
+This triggers re-signing and `bgp_process()` → new UPDATE.
+
+---

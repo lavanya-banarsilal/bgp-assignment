@@ -8810,6 +8810,19 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 	}
 
 	/*
+	 * SAFI_CRYPTO_ROUTES: locally-originated prefixes are always valid.
+	 * bgp_nexthop_reachability_check() only sets BGP_PATH_VALID for
+	 * SAFI_UNICAST / SAFI_LABELED_UNICAST; it does nothing for any other
+	 * SAFI.  Without this flag the path sits in the RIB but the update
+	 * group code at bgp_route.c:2481 filters it out as non-valid and
+	 * never generates an UPDATE — the prefix is never advertised.
+	 * EVPN/MPLS_VPN solve this by setting the flag explicitly (line above);
+	 * we do the same here.
+	 */
+	if (safi == SAFI_CRYPTO_ROUTES)
+		SET_FLAG(new->flags, BGP_PATH_VALID);
+
+	/*
 	 * SAFI_CRYPTO_ROUTES: sign the locally-originated prefix.
 	 *
 	 * If bgp->crypto_privkey_path is set, call bgp_crypto_sign() to
