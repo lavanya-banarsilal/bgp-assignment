@@ -6,7 +6,7 @@
  * bgpd/bgp_crypto_routes.c without requiring a live network.
  *
  * Pattern follows tests/bgpd/test_mp_attr.c — a self-contained C program
- * that prints "OK" / "FAILED" lines consumed by the Python runner.
+ * that prints "[PASS]" / "[FAIL]" lines consumed by the Python runner.
  *
  * What is tested:
  *  T1  TLV encode: bgp_crypto_routes_encode_nlri_trailer writes the correct
@@ -21,10 +21,9 @@
  *      sig_len points beyond the buffer end.
  *  T7  NLRI parse: returns BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW when
  *      TLV type byte is wrong (not 0xCE).
- *  T8  key_id: SHA-256 truncation produces a stable 4-byte ID.
- *  T9  SAFI value: SAFI_CRYPTO_ROUTES == 10, IANA_SAFI_CRYPTO_ROUTES == 241.
- *  T10 afindex: BGP_AF_IPV4_CRYPTO_ROUTES and BGP_AF_IPV6_CRYPTO_ROUTES
- *      return distinct, in-range indices from afindex().
+ *  T8  SAFI constants: SAFI_CRYPTO_ROUTES == 10, IANA_SAFI_CRYPTO_ROUTES == 241.
+ *  T9  TLV type constant: BGP_CRYPTO_SIG_TLV_TYPE == 0xCE.
+ *  T10 afindex: AFI_IP and AFI_IP6 return distinct, in-range indices.
  *
  * Copyright (C) 2025 BGP_ASSIGNMENT Project
  */
@@ -54,22 +53,34 @@ struct event_loop *master = NULL;
 #define VT100_RESET "\x1b[0m"
 
 static int failed = 0;
-static int tty = 0;
+static int total  = 0;
+static int tty    = 0;
 
+/*
+ * test_result() — core PASS/FAIL printer.
+ *
+ * Output format (non-TTY):
+ *   [PASS]  <name>
+ *   [FAIL]  <name>
+ *
+ * TTY adds green/red colour.  Using "PASS"/"FAIL" rather than "OK"/"FAILED"
+ * so the result is self-explanatory at a glance.
+ */
 static void test_result(const char *name, int ok)
 {
+	total++;
 	if (ok) {
 		if (tty)
-			fprintf(stdout, "%s%s%s: OK\n",
-				VT100_GREEN, name, VT100_RESET);
+			fprintf(stdout, "%s[PASS]%s  %s\n",
+				VT100_GREEN, VT100_RESET, name);
 		else
-			fprintf(stdout, "%s: OK\n", name);
+			fprintf(stdout, "[PASS]  %s\n", name);
 	} else {
 		if (tty)
-			fprintf(stderr, "%s%s%s: FAILED\n",
-				VT100_RED, name, VT100_RESET);
+			fprintf(stderr, "%s[FAIL]%s  %s\n",
+				VT100_RED, VT100_RESET, name);
 		else
-			fprintf(stderr, "%s: FAILED\n", name);
+			fprintf(stderr, "[FAIL]  %s\n", name);
 		failed++;
 	}
 }
@@ -79,11 +90,26 @@ static void test_result(const char *name, int ok)
 #define CHECK(name, expr) test_result(name, (expr))
 
 /* ── T1: TLV encode — correct bytes written ─────────────────────────────── */
+/*
+ * What it does:
+ *   Builds a fake bgp_path_info with known values (key_id=0xDEADBEEF,
+ *   algo=ECDSA_P256, sig={0xAA,0xBB,0xCC,0xDD}, seq=42) and calls
+ *   bgp_crypto_routes_encode_nlri_trailer().  Verifies every byte at
+ *   every offset in the output stream.
+ *
+ * What it guards:
+ *   An off-by-one, wrong byte order, or missing field in the TLV encoder
+ *   means every receiver will fail to parse the NLRI.  This test pins the
+ *   exact wire format so any regression is caught immediately.
+ *
+ * Expected: 16 bytes written in order:
+ *   CE | DEADBEEF | 01 | 0004 | AABBCCDD | 0000002A
+ */
 static void test_tlv_encode_basic(void)
 {
-	const char *tname = "T1: TLV encode basic";
+	printf("\nT1  TLV encoder writes exact byte sequence for known input\n");
+	printf("    (verifies correct wire format: type|key_id|algo|sig_len|sig|seq)\n");
 
-	/* Build a fake bgp_path_info with a known crypto struct */
 	struct bgp_path_info_extra_crypto crypto = {
 		.key_id     = 0xDEADBEEF,
 		.sig_algo   = BGP_CRYPTO_ALGO_ECDSA_P256,
@@ -97,14 +123,14 @@ static void test_tlv_encode_basic(void)
 	struct stream *s = stream_new(256);
 	int written = bgp_crypto_routes_encode_nlri_trailer(s, &path);
 
-	/* Expected layout:
-	 *  0xCE              (1 B, type)
-	 *  DE AD BE EF       (4 B, key_id big-endian)
-	 *  0x01              (1 B, algo)
-	 *  00 04             (2 B, sig_len = 4)
-	 *  AA BB CC DD       (4 B, sig)
-	 *  00 00 00 2A       (4 B, seq_no = 42)
-	 *  = 16 bytes total
+	/*
+	 * Expected layout (16 bytes total):
+	 *   [0]       0xCE              (TLV type)
+	 *   [1..4]    DE AD BE EF       (key_id, big-endian)
+	 *   [5]       0x01              (algo = ECDSA_P256)
+	 *   [6..7]    00 04             (sig_len = 4)
+	 *   [8..11]   AA BB CC DD       (sig bytes)
+	 *   [12..15]  00 00 00 2A       (seq_no = 42)
 	 */
 	int ok = 1;
 	ok &= (written == 16);
@@ -121,23 +147,50 @@ static void test_tlv_encode_basic(void)
 		       buf[14] == 0x00 && buf[15] == 0x2A);
 	}
 	stream_free(s);
-	test_result(tname, ok);
+	test_result("T1: encoder writes 16 bytes with correct type/key_id/algo/sig/seq", ok);
 }
 
 /* ── T2: TLV encode — NULL path writes nothing ──────────────────────────── */
+/*
+ * What it does:
+ *   Calls bgp_crypto_routes_encode_nlri_trailer() with a NULL path pointer.
+ *   Checks return value is 0 and the output stream remains empty.
+ *
+ * What it guards:
+ *   Withdrawal paths and routes not yet signed pass NULL.  The encoder must
+ *   not crash or write garbage bytes — unsigned routes must still be
+ *   encodable so the caller does not assert.
+ */
 static void test_tlv_encode_null_path(void)
 {
+	printf("\nT2  TLV encoder writes nothing (returns 0) when path is NULL\n");
+	printf("    (guards against crash on withdrawal paths or unsigned routes)\n");
+
 	struct stream *s = stream_new(64);
 	int written = bgp_crypto_routes_encode_nlri_trailer(s, NULL);
-	CHECK("T2: TLV encode null path returns 0", written == 0);
-	CHECK("T2: TLV encode null path writes 0 bytes",
+	CHECK("T2: encoder returns 0 for NULL path", written == 0);
+	CHECK("T2: encoder writes 0 bytes to stream for NULL path",
 	      stream_get_endp(s) == 0);
 	stream_free(s);
 }
 
 /* ── T3: TLV encode — sig_len==0 writes nothing ─────────────────────────── */
+/*
+ * What it does:
+ *   Creates a crypto struct with sig_len=0 (route not yet signed) and calls
+ *   the encoder.  Confirms nothing is written to the output stream.
+ *
+ * What it guards:
+ *   An originator that has not configured a private key yet sends a bare
+ *   NLRI with no TLV.  The receiver classifies it as SIG_NONE and keeps
+ *   it out of the FIB — the correct safe default.  The encoder must not
+ *   write a partial TLV in this case.
+ */
 static void test_tlv_encode_unsigned(void)
 {
+	printf("\nT3  TLV encoder writes nothing when sig_len == 0 (unsigned route)\n");
+	printf("    (guards against partial TLV when originator has no private key)\n");
+
 	struct bgp_path_info_extra_crypto crypto = {
 		.sig_len = 0,
 	};
@@ -146,7 +199,7 @@ static void test_tlv_encode_unsigned(void)
 
 	struct stream *s = stream_new(64);
 	int written = bgp_crypto_routes_encode_nlri_trailer(s, &path);
-	CHECK("T3: TLV encode unsigned (sig_len=0) returns 0", written == 0);
+	CHECK("T3: encoder returns 0 for sig_len=0 (unsigned route)", written == 0);
 	stream_free(s);
 }
 
@@ -211,75 +264,169 @@ static struct bgp_nlri make_nlri(const uint8_t *data, size_t len)
 }
 
 /* ── T4: NLRI parse — good buffer, no error ─────────────────────────────── */
+/*
+ * What it does:
+ *   Feeds a hand-crafted 17-byte NLRI for 10.0.0.0/8 with a complete TLV
+ *   (key_id=1, algo=0x01, sig_len=4, sig=AABBCCDD, seq=1) through the
+ *   parser in withdraw mode (so bgp_update() is not called).
+ *
+ * What it guards:
+ *   The happy-path parse.  Confirms the parser advances through the prefix
+ *   bytes and TLV fields correctly without an off-by-one or buffer over-read.
+ */
 static void test_nlri_parse_good(void)
 {
+	printf("\nT4  NLRI parser accepts a well-formed buffer (10.0.0.0/8 + complete TLV)\n");
+	printf("    (happy-path parse: verifies parser advances through fields correctly)\n");
+
 	struct bgp_nlri nlri = make_nlri(good_nlri, sizeof(good_nlri));
 	/*
-	 * bgp_nlri_parse_crypto_routes with attr=NULL and withdraw=true
-	 * exercises the withdraw path without touching bgp_update — it must
-	 * return BGP_NLRI_PARSE_OK.
+	 * withdraw=true exercises the withdraw path without calling bgp_update —
+	 * it must still return BGP_NLRI_PARSE_OK (no parse error).
 	 */
 	int rc = bgp_nlri_parse_crypto_routes(NULL, NULL, &nlri, true);
-	CHECK("T4: NLRI parse good buffer returns OK",
+	CHECK("T4: parser returns BGP_NLRI_PARSE_OK for well-formed NLRI",
 	      rc == BGP_NLRI_PARSE_OK);
 }
 
 /* ── T5: NLRI parse — truncated TLV header ──────────────────────────────── */
+/*
+ * What it does:
+ *   Buffer has the 0xCE type byte + key_id (4B) + algo (1B) but is missing
+ *   the mandatory sig_len (2B).  Parser runs in non-withdraw mode.
+ *
+ * What it guards:
+ *   Per RFC 4760 §5, a malformed MP_REACH_NLRI must trigger a BGP NOTIFY
+ *   and session reset.  A truncated TLV header must never be silently
+ *   accepted — it could mask a security event or lead to mis-parsing.
+ */
 static void test_nlri_parse_truncated_hdr(void)
 {
+	printf("\nT5  NLRI parser rejects truncated TLV header (sig_len field missing)\n");
+	printf("    (RFC 4760: malformed NLRI must trigger NOTIFY + session reset)\n");
+
 	struct bgp_nlri nlri = make_nlri(truncated_hdr_nlri,
 					 sizeof(truncated_hdr_nlri));
 	int rc = bgp_nlri_parse_crypto_routes(NULL, NULL, &nlri, false);
-	CHECK("T5: NLRI parse truncated TLV header returns OVERFLOW",
+	CHECK("T5: parser returns PACKET_OVERFLOW for truncated TLV header",
 	      rc == BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW);
 }
 
 /* ── T6: NLRI parse — truncated signature body ──────────────────────────── */
+/*
+ * What it does:
+ *   sig_len field claims 64 bytes but the buffer only contains 2 bytes of
+ *   signature.  Parser must detect that reading sig_len bytes would go
+ *   past the buffer boundary.
+ *
+ * What it guards:
+ *   Classic buffer over-read attack: a malicious peer sets a large sig_len
+ *   to make the router read past the NLRI buffer boundary.  The bounds
+ *   check here prevents that.
+ */
 static void test_nlri_parse_truncated_sig(void)
 {
+	printf("\nT6  NLRI parser rejects sig_len claiming 64 bytes when only 2 bytes present\n");
+	printf("    (guards against buffer over-read: attacker inflates sig_len)\n");
+
 	struct bgp_nlri nlri = make_nlri(truncated_sig_nlri,
 					 sizeof(truncated_sig_nlri));
 	int rc = bgp_nlri_parse_crypto_routes(NULL, NULL, &nlri, false);
-	CHECK("T6: NLRI parse truncated sig returns OVERFLOW",
+	CHECK("T6: parser returns PACKET_OVERFLOW for truncated signature body",
 	      rc == BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW);
 }
 
 /* ── T7: NLRI parse — wrong TLV type byte ───────────────────────────────── */
+/*
+ * What it does:
+ *   First byte after the prefix is 0xAB instead of the expected 0xCE.
+ *   Parser must detect the wrong magic byte and reject the NLRI.
+ *
+ * What it guards:
+ *   The TLV type byte (0xCE) is the magic delimiter between the prefix and
+ *   the signature data.  A wrong type means the stream is misaligned —
+ *   silently reading further would corrupt the parser state or mis-verify
+ *   a completely different byte range as a signature.
+ */
 static void test_nlri_parse_wrong_type(void)
 {
+	printf("\nT7  NLRI parser rejects wrong TLV type byte (0xAB instead of 0xCE)\n");
+	printf("    (guards against stream misalignment from wrong magic byte)\n");
+
 	struct bgp_nlri nlri = make_nlri(wrong_type_nlri,
 					 sizeof(wrong_type_nlri));
 	int rc = bgp_nlri_parse_crypto_routes(NULL, NULL, &nlri, false);
-	CHECK("T7: NLRI parse wrong TLV type returns OVERFLOW",
+	CHECK("T7: parser returns PACKET_OVERFLOW for wrong TLV type byte",
 	      rc == BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW);
 }
 
 /* ── T8: SAFI and IANA SAFI constants ───────────────────────────────────── */
+/*
+ * What it does:
+ *   Compile-time constant checks: SAFI_CRYPTO_ROUTES (internal FRR array
+ *   index) == 10 and IANA_SAFI_CRYPTO_ROUTES (IANA wire value) == 241.
+ *
+ * What it guards:
+ *   The two SAFI values serve different roles.  The internal index is used
+ *   for array indexing into the RIB (bgp->rib[afi][safi]); the IANA value
+ *   goes on the wire in MP_REACH_NLRI.  Confusing them causes routes to be
+ *   installed into the wrong table or sent with the wrong SAFI on the wire.
+ */
 static void test_safi_constants(void)
 {
-	CHECK("T8: SAFI_CRYPTO_ROUTES == 10",
+	printf("\nT8  SAFI constants: internal index == 10, IANA wire value == 241\n");
+	printf("    (guards against confusion between RIB array index and wire SAFI)\n");
+
+	CHECK("T8: SAFI_CRYPTO_ROUTES (internal index) == 10",
 	      SAFI_CRYPTO_ROUTES == 10);
-	CHECK("T8: IANA_SAFI_CRYPTO_ROUTES == 241",
+	CHECK("T8: IANA_SAFI_CRYPTO_ROUTES (wire value) == 241",
 	      IANA_SAFI_CRYPTO_ROUTES == 241);
 }
 
 /* ── T9: TLV type constant ──────────────────────────────────────────────── */
+/*
+ * What it does:
+ *   Asserts BGP_CRYPTO_SIG_TLV_TYPE == 0xCE.
+ *
+ * What it guards:
+ *   0xCE is in the private/experimental range (no IANA registration needed).
+ *   This test pins the magic byte so a refactor or merge cannot silently
+ *   change it and break the wire format.
+ */
 static void test_tlv_type_constant(void)
 {
+	printf("\nT9  TLV type magic byte must be 0xCE (private/experimental range)\n");
+	printf("    (pins the wire magic byte so it cannot be accidentally changed)\n");
+
 	CHECK("T9: BGP_CRYPTO_SIG_TLV_TYPE == 0xCE",
 	      BGP_CRYPTO_SIG_TLV_TYPE == 0xCE);
 }
 
 /* ── T10: afindex returns distinct in-range values ──────────────────────── */
+/*
+ * What it does:
+ *   Calls afindex(AFI_IP, SAFI_CRYPTO_ROUTES) and
+ *   afindex(AFI_IP6, SAFI_CRYPTO_ROUTES).  Checks both are >= 0,
+ *   < BGP_AF_MAX, and different from each other.
+ *
+ * What it guards:
+ *   FRR uses afindex() to slot into the per-instance RIB array
+ *   (bgp->rib[afi][safi]).  If the two AFIs return the same index, the
+ *   IPv4 and IPv6 crypto-route tables collide and corrupt each other.
+ *   Out-of-range values would cause an array out-of-bounds access.
+ */
 static void test_afindex(void)
 {
+	printf("\nT10 AFI_IP and AFI_IP6 afindex values are distinct and in range\n");
+	printf("    (guards against IPv4/IPv6 RIB array collision or out-of-bounds)\n");
+
 	int v4 = afindex(AFI_IP,  SAFI_CRYPTO_ROUTES);
 	int v6 = afindex(AFI_IP6, SAFI_CRYPTO_ROUTES);
-	CHECK("T10: AFI_IP  SAFI_CRYPTO_ROUTES afindex in range",
+	CHECK("T10: AFI_IP  SAFI_CRYPTO_ROUTES afindex is in [0, BGP_AF_MAX)",
 	      v4 >= 0 && v4 < BGP_AF_MAX);
-	CHECK("T10: AFI_IP6 SAFI_CRYPTO_ROUTES afindex in range",
+	CHECK("T10: AFI_IP6 SAFI_CRYPTO_ROUTES afindex is in [0, BGP_AF_MAX)",
 	      v6 >= 0 && v6 < BGP_AF_MAX);
-	CHECK("T10: AFI_IP and AFI_IP6 afindex values are distinct",
+	CHECK("T10: AFI_IP and AFI_IP6 afindex values are distinct (no table collision)",
 	      v4 != v6);
 }
 
@@ -288,11 +435,17 @@ int main(int argc, char **argv)
 {
 	tty = isatty(fileno(stdout));
 
+	printf("============================================================\n");
+	printf("  BGP crypto-routes SAFI 241 — wire-format unit tests\n");
+	printf("  Tests TLV encoder, NLRI parser, and compile-time constants\n");
+	printf("  No live network required.\n");
+	printf("============================================================\n");
+
 	/* Minimal FRR init required by libbgp */
 	bgp_master_init(NULL, BGP_SOCKET_SNDBUF_SIZE, list_new());
 	bgp_option_set(BGP_OPT_NO_LISTEN);
 
-	/* Initialise crypto-routes key cache (tested by T4–T7) */
+	/* Initialise crypto-routes key cache (exercised by T4–T7) */
 	bgp_crypto_routes_init();
 
 	/* Run all tests */
@@ -309,10 +462,12 @@ int main(int argc, char **argv)
 
 	bgp_crypto_routes_finish();
 
+	printf("\n============================================================\n");
 	if (failed)
-		fprintf(stderr, "\n%d test(s) FAILED\n", failed);
+		fprintf(stderr, "  Result : %d/%d TEST(S) FAILED\n", failed, total);
 	else
-		fprintf(stdout, "\nAll tests passed.\n");
+		fprintf(stdout, "  Result : ALL %d TESTS PASSED\n", total);
+	printf("============================================================\n");
 
 	return failed ? 1 : 0;
 }

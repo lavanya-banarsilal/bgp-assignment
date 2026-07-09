@@ -17,10 +17,11 @@
  *       tests/bgpd/test_crypto_sign_verify.c \
  *       -lcrypto
  *
- * Three test cases:
+ * Test cases:
  *   T-SV1  Sign 10.0.0.0/8, verify with correct key   -> PASS (expect valid)
  *   T-SV2  Sign 10.0.0.0/8, tamper 1 byte of sig      -> PASS (expect rejected)
  *   T-SV3  Sign 10.0.0.0/8, tamper prefix byte         -> PASS (expect rejected)
+ *   T-SV4  Sign 10.0.0.0/8, verify with wrong key      -> PASS (expect rejected)
  *
  * Copyright (C) 2025 BGP_ASSIGNMENT Project
  */
@@ -38,13 +39,25 @@
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
 static int g_failed = 0;
+static int g_total  = 0;
 
+/*
+ * check() — print a single assertion result as PASS or FAIL.
+ *
+ * Output format:
+ *   [PASS]  <name>
+ *   [FAIL]  <name>
+ *
+ * Using "PASS"/"FAIL" (not "OK"/"FAILED") so the output is immediately
+ * readable without knowing the convention.
+ */
 static void check(const char *name, int ok)
 {
+	g_total++;
 	if (ok)
-		printf("  %-60s  OK\n", name);
+		printf("  [PASS]  %s\n", name);
 	else {
-		fprintf(stderr, "  %-60s  FAILED\n", name);
+		fprintf(stderr, "  [FAIL]  %s\n", name);
 		g_failed++;
 	}
 }
@@ -62,6 +75,9 @@ static void clear_openssl_err(void)
  *   prefix_bytes  ceil(prefixlen/8) bytes  (network-order address)
  *   origin_asn    4 bytes uint32_t BE
  *   sequence_no   4 bytes uint32_t BE
+ *
+ * This is the exact buffer that bgp_crypto_verify() feeds to
+ * EVP_DigestVerify() in production — so these tests exercise the real path.
  */
 static size_t build_signed_data(
 		const uint8_t *prefix_addr,
@@ -110,7 +126,7 @@ static EVP_PKEY *generate_ec_keypair(void)
 /*
  * Sign data[] with pkey (must carry private component).
  * sig_buf must be at least 128 bytes.
- * Returns actual sig length on success, -1 on failure.
+ * Returns 0 on success, -1 on failure.
  */
 static int do_sign(EVP_PKEY *pkey,
 		   const uint8_t *data, size_t data_len,
@@ -152,9 +168,13 @@ static int do_verify(EVP_PKEY *pkey,
 
 int main(void)
 {
-	printf("=== BGP crypto-routes Phase 1e: sign/verify unit tests ===\n\n");
+	printf("============================================================\n");
+	printf("  BGP crypto-routes: ECDSA P-256 sign/verify unit tests\n");
+	printf("  Prefix: 10.0.0.0/8  |  AS: 65001  |  seq: 1\n");
+	printf("  Signed data = prefix_bytes || origin_asn || sequence_no\n");
+	printf("============================================================\n\n");
 
-	/* ── 1. Generate two independent ECDSA P-256 key pairs ──────────── */
+	/* ── Setup: generate two independent ECDSA P-256 key pairs ──────── */
 	EVP_PKEY *keypair = generate_ec_keypair();
 	if (!keypair) {
 		fprintf(stderr, "FATAL: ECDSA P-256 key generation failed (keypair 1)\n");
@@ -162,10 +182,8 @@ int main(void)
 	}
 
 	/*
-	 * T-SV4 requires a second, completely independent key pair.
-	 * Generated here so both keys exist throughout all tests and the
-	 * caller can be certain they are different objects with different
-	 * private scalars and public points.
+	 * T-SV4 requires a second, completely independent key pair to simulate
+	 * an attacker-controlled key that is NOT in our public-key cache.
 	 */
 	EVP_PKEY *wrong_keypair = generate_ec_keypair();
 	if (!wrong_keypair) {
@@ -173,14 +191,9 @@ int main(void)
 		EVP_PKEY_free(keypair);
 		return 1;
 	}
-	printf("  Key gen : Two independent ECDSA P-256 key pairs generated in memory.\n");
+	printf("  Setup   : Two independent ECDSA P-256 key pairs generated in memory.\n\n");
 
-	/*
-	 * Test parameters — same as the wire-format example in the header:
-	 *   Prefix   : 10.0.0.0/8
-	 *   Origin AS: 65001
-	 *   Seq no   : 1
-	 */
+	/* Shared test parameters */
 	uint8_t  prefix_addr[4] = { 0x0A, 0x00, 0x00, 0x00 };
 	uint8_t  prefixlen       = 8;
 	uint32_t origin_asn      = 65001;
@@ -203,22 +216,41 @@ int main(void)
 	       origin_asn, seq_no, sig_len);
 
 	/* ─────────────────────────────────────────────────────────────────
-	 * T-SV1: verify with unmodified signature and unmodified data
-	 * Expected: EVP_DigestVerify returns 1 (VALID)
+	 * T-SV1: Happy path — correct key verifies correctly signed data.
+	 *
+	 * What it does: calls EVP_DigestVerify with the original signature
+	 * and the matching public key. No tampering of any kind.
+	 *
+	 * What it guards: the basic sign→verify round-trip works end to end.
+	 * If this fails, no legitimate BGP UPDATE from any router can ever
+	 * be accepted.
+	 *
+	 * Expected result: EVP_DigestVerify returns 1 (VALID).
 	 * ───────────────────────────────────────────────────────────────── */
-	printf("T-SV1: verify correct signature over 10.0.0.0/8\n");
+	printf("T-SV1  Correct signature over 10.0.0.0/8 must verify successfully\n");
+	printf("       (proves the sign->verify round-trip works end to end)\n");
 	{
 		int rc = do_verify(keypair, signed_data, signed_data_len,
 				   sig, sig_len);
-		check("T-SV1: verify returns 1 (signature valid)", rc == 1);
+		check("T-SV1: EVP_DigestVerify returns 1 — signature accepted", rc == 1);
 	}
 	printf("\n");
 
 	/* ─────────────────────────────────────────────────────────────────
-	 * T-SV2: flip all bits in sig[0], then verify
-	 * Expected: EVP_DigestVerify returns 0 or negative (INVALID)
+	 * T-SV2: Tampered signature byte — must be rejected.
+	 *
+	 * What it does: copies the valid signature, flips all bits in
+	 * sig[0] (XOR 0xFF), then verifies with the correct key and
+	 * unchanged data.
+	 *
+	 * What it guards: a corrupted UPDATE packet, or an attacker who
+	 * modifies the signature bytes in transit. The router must set
+	 * sig_state = SIG_INVALID and block FIB installation.
+	 *
+	 * Expected result: EVP_DigestVerify returns != 1 (INVALID).
 	 * ───────────────────────────────────────────────────────────────── */
-	printf("T-SV2: tamper sig[0] (XOR 0xFF), verify same data\n");
+	printf("T-SV2  Tampered signature byte (sig[0] XOR 0xFF) must be rejected\n");
+	printf("       (guards against corrupted UPDATE or in-transit modification)\n");
 	{
 		uint8_t tampered_sig[128];
 		memcpy(tampered_sig, sig, sig_len);
@@ -226,17 +258,26 @@ int main(void)
 
 		int rc = do_verify(keypair, signed_data, signed_data_len,
 				   tampered_sig, sig_len);
-		check("T-SV2: verify returns !=1 (tampered sig rejected)", rc != 1);
+		check("T-SV2: EVP_DigestVerify returns !=1 — tampered signature rejected", rc != 1);
 		clear_openssl_err();
 	}
 	printf("\n");
 
 	/* ─────────────────────────────────────────────────────────────────
-	 * T-SV3: change prefix byte 0x0A -> 0x0B (10.x.x.x -> 11.x.x.x),
-	 * rebuild signed_data, then verify against the original signature.
-	 * Expected: EVP_DigestVerify returns 0 or negative (INVALID)
+	 * T-SV3: Tampered prefix — must be rejected (prefix hijack test).
+	 *
+	 * What it does: rebuilds signed_data with prefix 11.0.0.0/8
+	 * (byte 0x0A changed to 0x0B), then verifies the *original*
+	 * signature (produced for 10.0.0.0/8) against this new data.
+	 *
+	 * What it guards: prefix hijacking — an attacker cannot take a valid
+	 * signature for 10.0.0.0/8 and reuse it to authenticate 11.0.0.0/8
+	 * because the prefix bytes are part of the signed data.
+	 *
+	 * Expected result: EVP_DigestVerify returns != 1 (INVALID).
 	 * ───────────────────────────────────────────────────────────────── */
-	printf("T-SV3: tamper prefix (0x0A->0x0B, i.e. 11.0.0.0/8), verify with original sig\n");
+	printf("T-SV3  Signature for 10.0.0.0/8 must not verify for 11.0.0.0/8\n");
+	printf("       (guards against prefix hijack: sig is bound to exact prefix)\n");
 	{
 		uint8_t tampered_addr[4] = { 0x0B, 0x00, 0x00, 0x00 };
 		uint8_t tampered_data[40];
@@ -246,30 +287,32 @@ int main(void)
 
 		int rc = do_verify(keypair, tampered_data, tampered_len,
 				   sig, sig_len);
-		check("T-SV3: verify returns !=1 (tampered prefix rejected)", rc != 1);
+		check("T-SV3: EVP_DigestVerify returns !=1 — tampered prefix rejected", rc != 1);
 		clear_openssl_err();
 	}
 	printf("\n");
 
 	/* ─────────────────────────────────────────────────────────────────
-	 * T-SV4: verify the original signature with the WRONG public key.
+	 * T-SV4: Wrong public key — must be rejected (cross-AS key attack).
 	 *
-	 * This simulates a BGP peer sending a signature produced by a key
-	 * that is NOT in our provisioned cache — e.g. a key belonging to a
-	 * different AS, or a forged signature from an attacker-controlled
-	 * key pair.  In bgp_crypto_routes.c this maps to the case where
-	 * bgp_crypto_key_lookup() returns an entry whose pkey is unrelated
-	 * to the signing key: EVP_DigestVerify must return 0 and
-	 * bgp_crypto_verify() must set sig_state = BGP_CRYPTO_SIG_INVALID.
+	 * What it does: verifies the original (valid) signature with
+	 * wrong_keypair's public key instead of the correct keypair.
 	 *
-	 * Expected: EVP_DigestVerify returns 0 (INVALID) because wrong_keypair
-	 * was not used to produce sig[].
+	 * What it guards: in production this maps to a BGP peer sending a
+	 * signature produced by a key that is NOT in our provisioned cache
+	 * (e.g. forged by an attacker, or belonging to a different AS).
+	 * bgp_crypto_key_lookup() would return a cache entry whose pkey is
+	 * unrelated to the signing key → EVP_DigestVerify must reject it
+	 * and bgp_crypto_verify() must set sig_state = SIG_INVALID.
+	 *
+	 * Expected result: EVP_DigestVerify returns != 1 (INVALID).
 	 * ───────────────────────────────────────────────────────────────── */
-	printf("T-SV4: verify original sig with a different (wrong) public key\n");
+	printf("T-SV4  Correct signature verified with a different (wrong) public key must be rejected\n");
+	printf("       (guards against forged key / key not in provisioned cache)\n");
 	{
 		int rc = do_verify(wrong_keypair, signed_data, signed_data_len,
 				   sig, sig_len);
-		check("T-SV4: verify returns !=1 (wrong public key rejected)", rc != 1);
+		check("T-SV4: EVP_DigestVerify returns !=1 — wrong public key rejected", rc != 1);
 		clear_openssl_err();
 	}
 	printf("\n");
@@ -278,10 +321,12 @@ int main(void)
 	EVP_PKEY_free(wrong_keypair);
 	EVP_PKEY_free(keypair);
 
+	printf("============================================================\n");
 	if (g_failed == 0)
-		printf("=== All 4 tests PASSED ===\n");
+		printf("  Result : ALL %d TESTS PASSED\n", g_total);
 	else
-		fprintf(stderr, "=== %d/4 test(s) FAILED ===\n", g_failed);
+		fprintf(stderr, "  Result : %d/%d TEST(S) FAILED\n", g_failed, g_total);
+	printf("============================================================\n");
 
 	return g_failed ? 1 : 0;
 }

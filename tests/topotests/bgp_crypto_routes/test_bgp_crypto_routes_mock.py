@@ -49,7 +49,7 @@ Pre-conditions (run these once in the Codespace terminal before pytest):
 
   # 5. Run this test file
   cd /workspaces/bgp-assignment
-  python3 -m pytest tests/topotests/bgp_crypto_routes/test_bgp_crypto_routes_mock.py -v
+  python3 -m pytest tests/topotests/bgp_crypto_routes/test_bgp_crypto_routes_mock.py -v -s
 
 Copyright (C) 2025 BGP_ASSIGNMENT Project
 """
@@ -67,14 +67,61 @@ VTYSH_BIN  = "/usr/bin/vtysh"
 PUBKEY_PEM = "/tmp/test_pubkey.pem"
 ORIGIN_ASN = "65001"
 
+# ANSI colour codes — used only when stdout is a terminal
+_RESET = "\x1b[0m"
+_GREEN = "\x1b[32m"
+_RED   = "\x1b[31m"
+_BOLD  = "\x1b[1m"
+_USE_COLOR = sys.stdout.isatty()
+
+
+# ── Output helpers ────────────────────────────────────────────────────────────
+
+def _banner(test_id, headline, what_it_does, what_it_guards):
+    """
+    Print a clear per-test header before the test body runs.
+
+    Format:
+        ──────────────────────────────────────────────
+        M1  bgpd process health check
+        What it does  : ...
+        What it guards: ...
+        ──────────────────────────────────────────────
+    """
+    sep = "─" * 62
+    title = "{} — {}".format(test_id, headline)
+    if _USE_COLOR:
+        title = _BOLD + title + _RESET
+    print("\n" + sep)
+    print(title)
+    print("What it does  : {}".format(what_it_does))
+    print("What it guards: {}".format(what_it_guards))
+    print(sep)
+
+
+def _result(test_id, passed, detail=""):
+    """
+    Print a PASS or FAIL line after the assertion.
+
+    Format:
+        [PASS]  M1
+        [FAIL]  M1 — <detail>
+    """
+    if passed:
+        tag = (_GREEN + "[PASS]" + _RESET) if _USE_COLOR else "[PASS]"
+        print("{}  {}".format(tag, test_id))
+    else:
+        tag = (_RED + "[FAIL]" + _RESET) if _USE_COLOR else "[FAIL]"
+        msg = "{} — {}".format(test_id, detail) if detail else test_id
+        print("{}  {}".format(tag, msg), file=sys.stderr)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def vtysh(*cmds):
     """
     Run one or more vtysh -c "..." commands against the live bgpd VTY socket.
-    Returns the combined stdout string.
-    Raises subprocess.CalledProcessError on non-zero exit.
+    Returns the combined stdout+stderr string.
     """
     args = [VTYSH_BIN, "--vty_socket", VTY_SOCKET, "-d", "bgpd"]
     for cmd in cmds:
@@ -132,7 +179,10 @@ class TestCryptoRoutesMock:
     """
     Functional tests for BGP SAFI 241 (crypto-routes) against a live bgpd.
 
-    These mirror the 5 assertions in test_bgp_crypto_routes.py but run against
+    Each test prints a clear header describing what it does and why, then
+    prints [PASS] or [FAIL] so the output is self-explanatory at a glance.
+
+    These mirror the assertions in test_bgp_crypto_routes.py but run against
     a single bgpd instance via the VTY socket instead of a two-router namespace
     topology.  The session and prefix propagation tests (TEST 2, 3, 5 in the
     full topotest) are replaced by RIB-presence and VTY-output tests that are
@@ -144,13 +194,27 @@ class TestCryptoRoutesMock:
     def test_M1_bgpd_is_alive(self):
         """
         TEST M1 — bgpd must respond to 'show version' with recognisable output.
-
-        Mirrors: topotest TEST 1 session-established pre-condition.
-        Rationale: if bgpd has crashed or not started, all subsequent tests
-        are meaningless.  A quick version-check is the cheapest liveness probe.
         """
+        _banner(
+            "M1",
+            "bgpd process health check",
+            what_it_does=(
+                "Sends 'show version' to bgpd via the VTY Unix socket "
+                "and checks the response contains 'FRRouting' or 'frr'."
+            ),
+            what_it_guards=(
+                "Liveness probe — if bgpd has crashed or was never started "
+                "all subsequent tests are meaningless. Surfaces the real "
+                "problem immediately instead of a confusing connection error."
+            ),
+        )
+
         out = vtysh("show version")
-        assert "FRRouting" in out or "frr" in out.lower(), (
+        passed = "FRRouting" in out or "frr" in out.lower()
+        _result("M1", passed,
+                "bgpd did not return expected version string. "
+                "Output: {}".format(out[:120]))
+        assert passed, (
             "bgpd did not return expected version string.  Output: {}".format(out[:200])
         )
 
@@ -159,21 +223,34 @@ class TestCryptoRoutesMock:
     def test_M2_address_family_present(self):
         """
         TEST M2 — 'show bgp ipv4 crypto-routes' must not return an error.
-
-        Mirrors: topotest TEST 3 show_crypto_routes_vty.
-        Rationale: verifies that SAFI_CRYPTO_ROUTES RIB was allocated (the
-        address-family block is present in bgpd.conf) and the VTY command
-        is registered and reachable.  An empty table is acceptable — what
-        matters is that the command succeeds and returns the header line.
         """
+        _banner(
+            "M2",
+            "Crypto-routes address family is configured and VTY command is registered",
+            what_it_does=(
+                "Runs 'show bgp ipv4 crypto-routes'. An empty table is "
+                "acceptable — what matters is the command does not return "
+                "'Unknown command' or a CLI error."
+            ),
+            what_it_guards=(
+                "Confirms the SAFI 241 RIB was allocated (the "
+                "address-family block in bgpd.conf took effect) and the "
+                "show command is wired up. A missing install_element() call "
+                "would fail this test even if the C code is correct."
+            ),
+        )
+
         out = vtysh("show bgp ipv4 crypto-routes")
+        no_error = "Unknown command" not in out
+        _result("M2", no_error,
+                "VTY command returned an error: {}".format(out[:120]))
         assert "%" not in out or "crypto-routes" in out, (
             "show bgp ipv4 crypto-routes returned an error: {}".format(out[:200])
         )
-        # The command must emit the table header, not an unknown-command error
-        assert "Unknown command" not in out, (
+        assert no_error, (
             "VTY command not registered: {}".format(out[:200])
         )
+        _result("M2", True)
 
     # ── TEST M3: public key load ──────────────────────────────────────────────
 
@@ -181,15 +258,23 @@ class TestCryptoRoutesMock:
         """
         TEST M3 — Loading a P-256 public key via VTY must succeed and print
         the key-id confirmation line.
-
-        Mirrors: topotest TEST 4 pubkey_load_and_show.
-        Rationale: this exercises the full path:
-          VTY command → bgp_crypto_pubkey_load() → PEM_read_PUBKEY() →
-          SHA-256 fingerprint → hash_get() into g_key_cache.
-        The key-id printed on success is the 4-byte SHA-256 truncation of the
-        DER-encoded SubjectPublicKeyInfo — proves OpenSSL parsed the key and
-        the cache stored it.
         """
+        _banner(
+            "M3",
+            "Public key loads successfully via VTY",
+            what_it_does=(
+                "Issues 'bgp crypto-routes pubkey 65001 /tmp/test_pubkey.pem' "
+                "via VTY config mode and checks the response contains 'key-id' "
+                "or 'loaded' — the confirmation that bgpd stored the key."
+            ),
+            what_it_guards=(
+                "Exercises the full chain: VTY command -> "
+                "bgp_crypto_pubkey_load() -> PEM_read_PUBKEY() -> "
+                "SHA-256 fingerprint -> hash_get() into g_key_cache. "
+                "Without this working, no route can ever reach SIG_VERIFIED."
+            ),
+        )
+
         if not os.path.exists(PUBKEY_PEM):
             pytest.skip(
                 "Test public key not found at {}.  "
@@ -199,7 +284,10 @@ class TestCryptoRoutesMock:
                 )
             )
         out = load_pubkey(ORIGIN_ASN, PUBKEY_PEM)
-        assert "key-id" in out.lower() or "loaded" in out.lower(), (
+        passed = "key-id" in out.lower() or "loaded" in out.lower()
+        _result("M3", passed,
+                "Expected key-id confirmation from bgpd, got: {}".format(out[:120]))
+        assert passed, (
             "Expected key-id confirmation from bgpd, got: {}".format(out[:300])
         )
 
@@ -207,16 +295,24 @@ class TestCryptoRoutesMock:
 
     def test_M4_show_pubkeys(self):
         """
-        TEST M4 — 'show bgp crypto-routes pubkeys' must list the key loaded in
-        TEST M3 with the correct origin AS.
-
-        Mirrors: topotest TEST 4 pubkey_load_and_show (_check closure).
-        Rationale: validates that bgp_crypto_show_pubkeys() iterates the hash
-        table correctly and that the key_id / origin-as fields are rendered.
-        The test re-loads the key (idempotent — same key_id, same ASN → key
-        rotation path in bgp_crypto_pubkey_load) so it passes even if run in
-        isolation without TEST M3 having run first.
+        TEST M4 — 'show bgp crypto-routes pubkeys' must list the loaded key
+        with the correct origin AS.
         """
+        _banner(
+            "M4",
+            "show bgp crypto-routes pubkeys lists loaded key with correct ASN",
+            what_it_does=(
+                "Re-loads the public key (idempotent, exercises the key-rotation "
+                "path), then runs 'show bgp crypto-routes pubkeys'. Asserts "
+                "AS65001 and a hex key-id (0x...) appear in the output."
+            ),
+            what_it_guards=(
+                "Validates bgp_crypto_show_pubkeys() iterates the hash table "
+                "correctly and renders all fields. Without this the operator "
+                "has no visibility into which keys are provisioned."
+            ),
+        )
+
         if not os.path.exists(PUBKEY_PEM):
             pytest.skip("Test public key not found at {}".format(PUBKEY_PEM))
 
@@ -224,10 +320,18 @@ class TestCryptoRoutesMock:
         load_pubkey(ORIGIN_ASN, PUBKEY_PEM)
 
         out = vtysh("show bgp crypto-routes pubkeys")
-        assert ORIGIN_ASN in out, (
+        asn_present = ORIGIN_ASN in out
+        keyid_present = "key-id" in out.lower() or "0x" in out
+
+        _result("M4 (ASN present)", asn_present,
+                "AS{} not found in pubkeys output: {}".format(ORIGIN_ASN, out[:120]))
+        _result("M4 (key-id rendered)", keyid_present,
+                "key-id field not rendered in pubkeys output: {}".format(out[:120]))
+
+        assert asn_present, (
             "AS{} not found in pubkeys output: {}".format(ORIGIN_ASN, out[:300])
         )
-        assert "key-id" in out.lower() or "0x" in out, (
+        assert keyid_present, (
             "key-id field not rendered in pubkeys output: {}".format(out[:300])
         )
 
@@ -237,15 +341,27 @@ class TestCryptoRoutesMock:
         """
         TEST M5 — 'show bgp ipv6 crypto-routes' must not crash bgpd or return
         an unknown-command error.
-
-        Rationale: bgp_node_afi() was fixed in Phase 6 to return the correct AFI
-        for BGP_CRYPTO_ROUTES_NODE.  This test ensures that fix holds — before
-        the fix, the IPv6 variant silently operated on AFI_IP (wrong table).
-        An empty IPv6 table is acceptable; what matters is no crash and no CLI
-        error.
         """
+        _banner(
+            "M5",
+            "IPv6 crypto-routes show command does not crash",
+            what_it_does=(
+                "Runs 'show bgp ipv6 crypto-routes'. An empty IPv6 table is "
+                "fine — what matters is no crash and no 'Unknown command'."
+            ),
+            what_it_guards=(
+                "bgp_node_afi() was fixed to return the correct AFI for "
+                "BGP_CRYPTO_ROUTES_NODE. Before the fix the IPv6 variant "
+                "silently queried the IPv4 table. This is a regression guard "
+                "for that fix."
+            ),
+        )
+
         out = vtysh("show bgp ipv6 crypto-routes")
-        assert "Unknown command" not in out, (
+        passed = "Unknown command" not in out
+        _result("M5", passed,
+                "IPv6 crypto-routes VTY command not registered: {}".format(out[:120]))
+        assert passed, (
             "IPv6 crypto-routes VTY command not registered: {}".format(out[:200])
         )
 
@@ -253,18 +369,31 @@ class TestCryptoRoutesMock:
 
     def test_M6_bgp_summary_shows_safi(self):
         """
-        TEST M6 — 'show bgp summary' must not crash.
-
-        Rationale: bgp_show_summary() iterates all configured AFs. Adding a new
-        SAFI without updating the summary iterator would cause a NULL-deref or
-        assertion failure when the operator runs this common operational command.
+        TEST M6 — 'show bgp summary' must not crash with crypto-routes AF active.
         """
+        _banner(
+            "M6",
+            "show bgp summary does not crash with SAFI 241 active",
+            what_it_does=(
+                "Runs 'show bgp summary' — the most-used operational command. "
+                "Checks no CLI error strings appear. "
+                "'No BGP neighbors found' is a normal informational message, "
+                "not an error."
+            ),
+            what_it_guards=(
+                "bgp_show_summary() iterates all configured AFs. Adding a new "
+                "SAFI without updating that iterator causes a NULL-deref or "
+                "assertion failure on a command operators run constantly."
+            ),
+        )
+
         out = vtysh("show bgp summary")
         # "% No BGP neighbors found in VRF default" is a valid FRR
         # informational line when no peers are configured — not a CLI error.
-        # The real error strings are "% Unknown command" and
-        # "% Command incomplete".
-        assert "Unknown command" not in out and "Command incomplete" not in out, (
+        passed = "Unknown command" not in out and "Command incomplete" not in out
+        _result("M6", passed,
+                "show bgp summary returned a CLI error: {}".format(out[:120]))
+        assert passed, (
             "show bgp summary returned a CLI error: {}".format(out[:200])
         )
 
@@ -274,15 +403,23 @@ class TestCryptoRoutesMock:
         """
         TEST M7 — 'bgp crypto-routes privkey FILENAME' must accept a path and
         print a confirmation, and 'no bgp crypto-routes privkey' must succeed.
-
-        Rationale: Phase 11 added the privkey provisioning command so locally-
-        originated prefixes can be signed.  This test validates that the VTY
-        command is registered, parses the filename argument correctly, and
-        reports success (the confirmation message proves bgp->crypto_privkey_path
-        was set).  We do NOT attempt to originate and sign a real prefix in
-        this mock test (that requires a full network statement + UPDATE assembly
-        path) — this test only validates the VTY plumbing.
         """
+        _banner(
+            "M7",
+            "Private key provisioning and removal via VTY",
+            what_it_does=(
+                "Issues 'bgp crypto-routes privkey /tmp/test_privkey.pem' via "
+                "VTY config mode and checks for a confirmation message. "
+                "Then issues the 'no' variant and checks the removal confirmation."
+            ),
+            what_it_guards=(
+                "An originator router must be able to configure (and revoke) "
+                "its private key path via CLI. This validates the VTY plumbing "
+                "sets bgp->crypto_privkey_path correctly — without which the "
+                "originator cannot sign any prefix."
+            ),
+        )
+
         privkey_path = "/tmp/test_privkey.pem"
         if not os.path.exists(privkey_path):
             pytest.skip("Test private key not found at {}".format(privkey_path))
@@ -296,7 +433,10 @@ class TestCryptoRoutesMock:
             "exit",
             "exit",
         )
-        assert "privkey" in out.lower() or "set" in out.lower(), (
+        set_ok = "privkey" in out.lower() or "set" in out.lower()
+        _result("M7 (privkey set)", set_ok,
+                "No confirmation from 'bgp crypto-routes privkey': {}".format(out[:120]))
+        assert set_ok, (
             "Expected confirmation from 'bgp crypto-routes privkey', got: {}".format(out[:300])
         )
 
@@ -310,6 +450,9 @@ class TestCryptoRoutesMock:
             "exit",
             "exit",
         )
-        assert "removed" in out_no.lower() or "privkey" in out_no.lower(), (
+        unset_ok = "removed" in out_no.lower() or "privkey" in out_no.lower()
+        _result("M7 (privkey removed)", unset_ok,
+                "No confirmation from 'no bgp crypto-routes privkey': {}".format(out_no[:120]))
+        assert unset_ok, (
             "Expected confirmation from 'no bgp crypto-routes privkey', got: {}".format(out_no[:300])
         )
